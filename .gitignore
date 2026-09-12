@@ -1,0 +1,26 @@
+# Entorno virtual (nunca se sube: se reconstruye con requirements.txt)
+.venv/
+venv/
+env/
+
+# Archivos compilados de Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Caches de herramientas de calidad
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Configuracion local de editores
+.vscode/
+.idea/
+
+# Sistema operativo
+Thumbs.db
+.DS_Store
+
+# NOTA: data/ y models/ SI se versionan a proposito.
+# El CI de GitHub Actions necesita el CSV para reentrenar, y el .joblib
+# es un entregable explicito del Hito 1.

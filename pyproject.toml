@@ -1,0 +1,14 @@
+# Configuracion de herramientas de calidad del proyecto.
+# Vive aqui (y no en la linea de comandos) para que corra IGUAL en el PC del
+# equipo y en la maquina limpia de GitHub Actions.
+
+[tool.pytest.ini_options]
+# Sin esto, "from main import app" solo funciona si se invoca como
+# "python -m pytest" (que agrega la carpeta actual al path). Con pythonpath
+# fijado, tambien funciona escribiendo simplemente "pytest".
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+# El linter no debe revisar datos ni modelos binarios, solo codigo fuente.
+exclude = ["data", "models"]

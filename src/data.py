@@ -145,13 +145,22 @@ def construir_catalogo_vehiculos(df_visitas: pd.DataFrame) -> pd.DataFrame: # lo
 
     ultima = df.groupby(col_vin).tail(1).set_index(col_vin) #esto hace que para cada chasis nos quedemos con la ultima visita (la mas reciente) y la pongamos en un DataFrame indexado por VIN. De esa manera, para cada chasis tenemos su ultima marca, gama, tipo de cargo, kilometraje, anio del modelo y fecha de ingreso al taller.
 
+    # COHERENCIA ENTRENAMIENTO/SERVICIO: generar_target_y_features() descarta los
+    # kilometrajes imposibles (errores de digitacion tipo 123.456.789), asi que el
+    # modelo NUNCA vio esos valores. Si el catalogo se los entregara en produccion,
+    # el modelo estaria extrapolando fuera de su rango conocido. No borramos el VIN
+    # del catalogo (el asesor debe poder consultarlo): solo anulamos el dato para
+    # que el imputador use la mediana, igual que con cualquier valor faltante.
+    kms_catalogo = pd.to_numeric(ultima[config.COLUMNA_KMS], errors="coerce")
+    kms_catalogo = kms_catalogo.where(kms_catalogo < config.KMS_MAXIMO_VALIDO)
+
     # Armamos la ficha con los mismos nombres que espera el pipeline, mas el anio del modelo y la fecha de la ultima visita (para mostrarlos al asesor).
-    
+
     catalogo = pd.DataFrame({
         "Gama": ultima[config.COLUMNA_GAMA],
         "Tipo Cargo": ultima[config.COLUMNA_TIPO_CARGO],
         "Tipo de Trabajo": ultima.get(config.COLUMNA_TIPO_TRABAJO, "MECANICA"),
-        "Kms.": ultima[config.COLUMNA_KMS],
+        "Kms.": kms_catalogo,
         "Anio_Modelo": ultima[col_ano],
         "Es_Vehiculo_Vendido": vendido,
         "Ultima_Visita": ultima[config.COLUMNA_FECHA_ENTRADA],

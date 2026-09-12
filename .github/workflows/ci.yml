@@ -26,6 +26,11 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: "3.12"
+        # Guarda las librerias descargadas entre ejecuciones. La primera corrida
+        # sigue igual de lenta; las siguientes se saltan la descarga de pandas,
+        # numpy y scikit-learn, que son las mas pesadas.
+        cache: "pip"
+        cache-dependency-path: requirements.txt
 
     - name: 3. Instalar dependencias del proyecto
       # Aqui se demuestra para que sirve requirements.txt: reconstruir el

@@ -105,3 +105,35 @@ def test_vin_inexistente_404():
     # 404 = "el recurso no existe". Es distinto de un 500 (error del servidor):
     # aqui la API funciono bien, simplemente ese carro nunca vino al taller.
     assert response.status_code == 404
+
+
+def test_vin_con_datos_incompletos_no_rompe():
+    """Verifica que un chasis con año de modelo o kilometraje faltante responda
+    igual, en lugar de tumbar el endpoint con un error 500.
+
+    El historial del taller no esta completo: hay VIN sin año de modelo y sin
+    kilometraje. Antes, int(NaN) reventaba y NaN generaba un JSON invalido que
+    ningun cliente podia leer. Esta prueba deja fijado que esos casos se
+    devuelven como null y que la prediccion se sigue calculando.
+    """
+    import joblib
+    from src import config
+
+    catalogo = joblib.load(config.RUTA_CATALOGO_VEHICULOS)
+    incompletos = catalogo[catalogo["Anio_Modelo"].isna() | catalogo["Kms."].isna()]
+
+    # Si algun dia la base llega completa, no hay nada que probar aqui.
+    if len(incompletos) == 0:
+        return
+
+    vin = str(incompletos.index[0])
+    response = client.get(f"/predict/vin/{vin}")
+
+    assert response.status_code == 200
+    data = response.json()                 # .json() falla solo si el JSON es invalido
+    assert isinstance(data["prediccion_dias_retorno"], float)
+
+    # El dato faltante debe viajar como null explicito, no como NaN ni como 0.
+    ficha = data["datos_encontrados"]
+    assert ficha["anio_modelo"] is None or isinstance(ficha["anio_modelo"], int)
+    assert ficha["ultimo_kilometraje"] is None or isinstance(ficha["ultimo_kilometraje"], float)

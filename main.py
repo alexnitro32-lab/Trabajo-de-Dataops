@@ -27,6 +27,31 @@ try:
 except Exception: # Si el .joblib no existe (por ejemplo, nunca se corrio el entrenamiento), NO tumbamos el servidor: lo dejamos en None y avisamos en los endpoints. Asi el health check sigue respondiendo y se puede diagnosticar el problema.
     catalogo = None
 
+# AYUDANTES PARA DATOS INCOMPLETOS DEL HISTORIAL
+
+# NaN es el "no se sabe" que entienden pandas y scikit-learn: el SimpleImputer
+# lo reemplaza por la mediana. Lo declaramos una sola vez con nombre propio para
+# que quede claro que es intencional y no un calculo que salio mal.
+FALTANTE = float("nan")
+
+
+def _a_float(valor):
+    """Convierte un valor del catálogo a float, o a None si viene vacío/nulo.
+
+    Se usa para que un dato faltante viaje como null en el JSON de respuesta.
+    """
+    if pd.isna(valor):
+        return None
+    return float(valor)
+
+
+def _a_fecha(valor):
+    """Convierte una marca de tiempo del catálogo a texto 'AAAA-MM-DD', o None."""
+    if pd.isna(valor):
+        return None
+    return str(pd.Timestamp(valor).date())
+
+
 # CONTRATO DE ENTRADA CON PYDANTIC Esta clase es el "formulario obligatorio" de la API: define que campos deben llegar y de que tipo. FastAPI valida el JSON contra esta clase ANTES de que l codigo toque el modelo. Si algo no cuadra, responde 422 automaticamente.
 class SolicitudVehiculo(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -137,32 +162,53 @@ def predecir_por_vin(vin: str):
     # .loc[vin] trae la fila del catalogo como una Serie de pandas.
     ficha = catalogo.loc[vin]
 
-    # Misma conversion que en POST /predict: el modelo solo entiende antiguedad.
-    antiguedad = max(0.0, float(date.today().year - ficha["Anio_Modelo"]))
+    try:
+        # El historial del taller no siempre esta completo: hay chasis sin anio
+        # de modelo o sin kilometraje registrado. Los dejamos como NaN a
+        # proposito para que el SimpleImputer del pipeline los rellene con la
+        # mediana, exactamente igual que hace durante el entrenamiento.
+        # Inventar un 0 seria peor: le diria al modelo que es un carro nuevo.
+        anio_modelo = _a_float(ficha["Anio_Modelo"])
+        kms = _a_float(ficha["Kms."])
 
-    # Mismas 6 llaves y mismos nombres que en POST /predict: el ColumnTransformer
-    # busca las columnas por nombre exacto y falla si alguna cambia.
-    df_entrada = pd.DataFrame([{
-        "Gama": ficha["Gama"],
-        "Tipo Cargo": ficha["Tipo Cargo"],
-        "Tipo de Trabajo": ficha["Tipo de Trabajo"],
-        "Kms.": float(ficha["Kms."]),
-        "Antiguedad_Vehiculo": antiguedad,
-        "Es_Vehiculo_Vendido": int(ficha["Es_Vehiculo_Vendido"])
-    }])
+        # Misma conversion que en POST /predict: el modelo solo entiende
+        # antiguedad. Si no hay anio de modelo, la antiguedad tambien es NaN.
+        antiguedad = FALTANTE if anio_modelo is None else max(0.0, float(date.today().year - anio_modelo))
 
-    prediccion = pipeline.predict(df_entrada)
+        # Mismas 6 llaves y mismos nombres que en POST /predict: el ColumnTransformer
+        # busca las columnas por nombre exacto y falla si alguna cambia.
+        df_entrada = pd.DataFrame([{
+            "Gama": ficha["Gama"],
+            "Tipo Cargo": ficha["Tipo Cargo"],
+            "Tipo de Trabajo": ficha["Tipo de Trabajo"],
+            "Kms.": FALTANTE if kms is None else kms,
+            "Antiguedad_Vehiculo": antiguedad,
+            "Es_Vehiculo_Vendido": int(ficha["Es_Vehiculo_Vendido"])
+        }])
+
+        prediccion = pipeline.predict(df_entrada)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Misma red de seguridad que en POST /predict: un dato corrupto en el
+        # catalogo no debe devolverle al asesor un stack trace.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error al procesar la predicción del VIN '{vin}': {str(e)}"
+        )
 
     # Devolvemos tambien los datos encontrados: el asesor debe poder VERIFICAR
     # que el sistema busco el carro correcto antes de creerle a la prediccion.
+    # Los faltantes viajan como null (JSON valido); NaN NO es JSON valido y
+    # rompe a cualquier cliente que intente leer la respuesta.
     return {
         "vin": vin,
         "datos_encontrados": {
             "gama": ficha["Gama"],
-            "anio_modelo": int(ficha["Anio_Modelo"]),
-            "antiguedad_calculada": antiguedad,
-            "ultimo_kilometraje": float(ficha["Kms."]),
-            "ultima_visita": str(ficha["Ultima_Visita"].date()),
+            "anio_modelo": None if anio_modelo is None else int(anio_modelo),
+            "antiguedad_calculada": None if anio_modelo is None else antiguedad,
+            "ultimo_kilometraje": kms,
+            "ultima_visita": _a_fecha(ficha["Ultima_Visita"]),
             "vendido_por_nosotros": bool(ficha["Es_Vehiculo_Vendido"])
         },
         "prediccion_dias_retorno": round(float(prediccion[0]), 1),
