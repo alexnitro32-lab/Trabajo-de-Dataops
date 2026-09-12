@@ -12,7 +12,6 @@ Este proyecto responde una pregunta concreta:
 
 Con esa cifra, el asesor puede contactar al cliente **antes** de que se le pase el turno — y el taller puede anticipar su carga de trabajo.
 
-
 ---
 
 ## Requisitos
@@ -20,10 +19,17 @@ Con esa cifra, el asesor puede contactar al cliente **antes** de que se le pase 
 - **Python 3.12 o superior** — verifica con `python --version`
 - **Git**
 
-
 ---
 
 ## Instalación
+
+Clona el repositorio y crea un entorno virtual con las dependencias. Elige el bloque de tu sistema operativo.
+
+### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/alexnitro32-lab/Trabajo-de-Dataops.git
+cd "Trabajo-de-Dataops"
 
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
