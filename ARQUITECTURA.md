@@ -33,7 +33,7 @@ Lo que **no** logra todavía: predecir con precisión útil. Ver [sección 6](#6
             ▼
    ┌─────────────────────┐  cargar_datos()
    │  src/data.py        │  · detecta separador y encoding
-   │  CARGA              │  · limpia BOM y espacios de los encabezados
+   │  CARGA              │  · limpieza
    └─────────────────────┘
             │
             ▼
