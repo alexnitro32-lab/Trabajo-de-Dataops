@@ -180,19 +180,6 @@ Tarda unos segundos y sobrescribe los dos archivos de `models/`. Al final imprim
 
 ---
 
-## Problemas comunes
-
-| Síntoma | Causa | Solución |
-|---|---|---|
-| `modelo_cargado: false` en `/` | Faltan los `.joblib` de `models/` | `python -m src.train` |
-| `ModuleNotFoundError: No module named 'fastapi'` | El entorno virtual no está activo | Actívalo y repite `pip install -r requirements.txt` |
-| `ModuleNotFoundError: No module named 'src'` | Estás parado en otra carpeta | `cd` a la raíz del proyecto (donde está `main.py`) |
-| `Activate.ps1 cannot be loaded` | Política de ejecución de PowerShell | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
-| `404` al consultar un VIN | Ese chasis no tiene historial | Usa `POST /predict` e ingresa los datos a mano |
-| `InconsistentVersionWarning` de scikit-learn | Tu versión difiere de la que creó el `.joblib` | `python -m src.train` para regenerarlo |
-
----
-
 ## Endpoints disponibles
 
 | Método | Ruta | Para qué sirve |
