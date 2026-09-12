@@ -12,7 +12,6 @@ Este proyecto responde una pregunta concreta:
 
 Con esa cifra, el asesor puede contactar al cliente **antes** de que se le pase el turno — y el taller puede anticipar su carga de trabajo.
 
-> ⚠️ **Antes de usarlo en producción, lee [Estado actual del modelo](#estado-actual-del-modelo).** El pipeline funciona de punta a punta, pero la precisión todavía no es de nivel productivo.
 
 ---
 
@@ -21,19 +20,10 @@ Con esa cifra, el asesor puede contactar al cliente **antes** de que se le pase 
 - **Python 3.12 o superior** — verifica con `python --version`
 - **Git**
 
-Nada más. No hace falta base de datos ni Docker.
 
 ---
 
 ## Instalación
-
-Copia y pega. Toma unos 5 minutos, casi todo descargando librerías.
-
-### Windows (PowerShell)
-
-```powershell
-git clone https://github.com/alexnitro32-lab/Trabajo-de-Dataops.git
-cd "Trabajo-de-Dataops"
 
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
