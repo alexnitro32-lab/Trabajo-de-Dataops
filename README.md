@@ -105,7 +105,7 @@ de la variable `Kms.`).
 - **División:** 80 % entrenamiento / 20 % test, con semilla fija (reproducibilidad)
 - **Serialización:** se guarda el **Pipeline completo**, no solo el estimador
 
-Este último punto es la buena práctica central de la Clase 6: el `.joblib` incluye el
+el `.joblib` incluye el
 `ColumnTransformer`. Gracias a eso, la API **no reimplementa ni una línea** del
 preprocesamiento, lo que elimina el riesgo de *training/serving skew* (que los datos
 se preparen distinto al entrenar y al predecir).
