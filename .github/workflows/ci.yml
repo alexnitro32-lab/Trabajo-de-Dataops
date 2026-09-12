@@ -1,0 +1,53 @@
+# ci.yml - INTEGRACION CONTINUA (GitHub Actions) # Este archivo es el "inspector automatico" del proyecto. en github
+
+name: Integración Continua (DataOps / CI)
+
+# "on" define los DISPARADORES: cuando debe ejecutarse este flujo.
+on:
+  push:
+    branches: [ "main" ]          # Al subir commits directamente a la rama main
+  pull_request:
+    branches: [ "main" ]          # Y al proponer cambios hacia main mediante un PR
+
+jobs:
+  build-and-test:
+    # Maquina virtual gratuita de GitHub. Es Linux, por eso el proyecto no debe depender de rutas de Windows escritas a mano (para eso usamos pathlib).
+    runs-on: ubuntu-latest
+
+    # Los pasos se ejecutan EN ORDEN. Si uno falla, los siguientes no corren.
+    steps:
+    - name: 1. Descargar código del repositorio
+      # Accion oficial que hace el git clone del repositorio dentro de la VM.
+      uses: actions/checkout@v4
+
+    - name: 2. Configurar entorno Python 3.12
+      # Instala la version exacta de Python. Fijarla evita que el proyecto se
+      # rompa cuando GitHub cambie su version por defecto.
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: 3. Instalar dependencias del proyecto
+      # Aqui se demuestra para que sirve requirements.txt: reconstruir el
+      # entorno completo en una maquina que empieza vacia.
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: 4. Inspección de código con Linter (Ruff)
+      # Revisa estilo y errores estaticos (imports sin usar, variables muertas).
+      # Es lo mas barato y rapido, por eso va primero: falla en segundos.
+      run: |
+        python -m ruff check .
+
+    - name: 5. Ejecutar pipeline de entrenamiento
+      # Reentrena el modelo desde el CSV en la nube. Esto valida que los datos
+      # esten versionados y que el pipeline sea 100% reproducible.
+      run: |
+        python -m src.train
+
+    - name: 6. Ejecutar pruebas unitarias (Pytest)
+      # Va DESPUES del entrenamiento a proposito: las pruebas necesitan que el
+      # archivo models/modelo_retencion.joblib ya exista para poder cargarlo.
+      run: |
+        python -m pytest
