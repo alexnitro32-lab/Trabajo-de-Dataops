@@ -1,7 +1,7 @@
 # API de Retención Predictiva — Automotor.co S.A.S.
 
 
-Proyecto de MLOps que toma la base transaccional de órdenes de trabajo de un taller
+Este proyecto toma la base transaccional de órdenes de trabajo de un taller
 automotriz, entrena un modelo de regresión para estimar **cuántos días pasarán hasta
 que un vehículo regrese al taller**, congela ese modelo en disco y lo expone como
 una **API REST con FastAPI**, todo respaldado por pruebas automáticas e integración
