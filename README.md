@@ -1,4 +1,4 @@
-# API de Retención Predictiva — Automotor.co S.A.S.
+# API de Retención Predictiva — Concesionario Posventa
 
 
 Este proyecto toma la base transaccional de órdenes de trabajo de un taller
@@ -11,8 +11,8 @@ continua en GitHub Actions.
 
 ## El problema de negocio
 
-El taller no sabe cuándo va a volver cada cliente. Eso hace imposible planear
-la capacidad de bahías, la compra de repuestos y las campañas de retención.
+El taller automotriz no sabe cuándo va a volver cada cliente. Eso hace imposible planear
+la capacidad de bahías, la compra de repuestos y las campañas de retención, asi mismo es un cliente el cual se va para otro taller y no se logra fidelizar perjudicando el ingreso y el aumento de trabajo del taller. Anticipar esto y poder captar clientes seria lo idea, y poder predecir el promedio en que vendra el cliente nos ayudaria a robustecer nuestro CRM y generar acciones de marketing antes de que el tiempo de prediccion del cliente informe que ha pasado su promedio de ingreso.
 
 La pregunta que responde este proyecto es concreta:
 
