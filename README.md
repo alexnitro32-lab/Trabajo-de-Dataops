@@ -1,198 +1,99 @@
-# API de Retención Predictiva — Concesionario Posventa
+# API de Retención Predictiva — Taller Automotor.co S.A.S.
 
+Una API que predice **en cuántos días volverá un vehículo al taller**, a partir del historial de órdenes de trabajo del concesionario.
 
-Este proyecto toma la base transaccional de órdenes de trabajo de un taller
-automotriz, entrena un modelo de regresión para estimar **cuántos días pasarán hasta
-que un vehículo regrese al taller**, congela ese modelo en disco y lo expone como
-una **API REST con FastAPI**, todo respaldado por pruebas automáticas e integración
-continua en GitHub Actions.
+## ¿Qué problema resuelve?
 
----
+Hoy el taller no sabe cuándo va a regresar cada cliente. Sin eso no se puede planear cuántas bahías se van a necesitar, qué repuestos comprar, ni a quién llamar antes de que se lo lleve la competencia.
 
-## El problema de negocio
+Este proyecto responde una pregunta concreta:
 
-El taller automotriz no sabe cuándo va a volver cada cliente. Eso hace imposible planear
-la capacidad de bahías, la compra de repuestos y las campañas de retención, asi mismo es un cliente el cual se va para otro taller y no se logra fidelizar perjudicando el ingreso y el aumento de trabajo del taller. Anticipar esto y poder captar clientes seria lo idea, y poder predecir el promedio en que vendra el cliente nos ayudaria a robustecer nuestro CRM y generar acciones de marketing antes de que el tiempo de prediccion del cliente informe que ha pasado su promedio de ingreso.
+> Un vehículo acaba de salir del taller. ¿En cuántos días volverá?
 
-La pregunta que responde este proyecto es concreta:
+Con esa cifra, el asesor puede contactar al cliente **antes** de que se le pase el turno — y el taller puede anticipar su carga de trabajo.
 
-> Dado un vehículo que acaba de salir del taller, ¿en cuántos días volverá?
-
-La respuesta permite anticipar la carga de trabajo y contactar al cliente **antes**
-de que se vaya a la competencia.
+> ⚠️ **Antes de usarlo en producción, lee [Estado actual del modelo](#estado-actual-del-modelo).** El pipeline funciona de punta a punta, pero la precisión todavía no es de nivel productivo.
 
 ---
 
-## Arquitectura del proyecto
+## Requisitos
 
-```
-Trabajo de Dataops/
-│
-├── data/
-│   └── Base de datos Limpia..csv      # Materia prima: 34.935 sub-trabajos históricos
-│
-├── src/                               # Capa de entrenamiento (modular, por responsabilidad)
-│   ├── config.py                      # Rutas, semilla, nombres de columnas (fuente única de verdad)
-│   ├── data.py                        # Carga, consolidación por OT/VIN y creación del target
-│   ├── features.py                    # ColumnTransformer: escalado, imputación y codificación
-│   ├── evaluate.py                    # Métricas de regresión (MAE, RMSE, R²)
-│   └── train.py                       # Orquestador: entrena, evalúa y serializa
-│
-├── models/
-│   ├── modelo_retencion.joblib        # Pipeline COMPLETO congelado (preprocesador + modelo)
-│   └── catalogo_vehiculos.joblib      # Ficha por VIN para autocompletar la búsqueda por chasis
-│
-├── main.py                            # API REST con FastAPI (health check + /predict + /predict/vin)
-│
-├── tests/
-│   └── test_api.py                    # Pruebas de integración con TestClient
-│
-├── .github/workflows/ci.yml           # Integración continua: ruff → train → pytest
-├── requirements.txt                   # Dependencias exactas del entorno            
-└── README.md
-```
+- **Python 3.12 o superior** — verifica con `python --version`
+- **Git**
+
+Nada más. No hace falta base de datos ni Docker.
+
 ---
 
-## Del CSV crudo al dataset de entrenamiento
+## Instalación
 
-El dataset original **no sirve tal cual** para entrenar. Estas son las tres
-transformaciones críticas que hace `src/data.py`:
+Copia y pega. Toma unos 5 minutos, casi todo descargando librerías.
 
-### Consolidación transaccional por OT y VIN
-El CSV está a nivel de *sub-trabajo*: una misma visita al taller genera varias filas
-(`Núm. Trabajo` 1, 2, 3...). Se agrupa por `VIN` + `OT` para obtener **una fila por
-ingreso físico real** del vehículo, tomando la fecha de entrada mínima, la de cierre
-máxima y el kilometraje más alto.
+### Windows (PowerShell)
 
-> 34.935 sub-trabajos → **27.697 visitas reales** de **9.729 vehículos únicos**
+```powershell
+git clone https://github.com/alexnitro32-lab/Trabajo-de-Dataops.git
+cd "Trabajo-de-Dataops"
 
-### Generación de la variable objetivo con `shift(-1)`
-La columna a predecir no existe en el CSV: se construye. Ordenando las visitas de
-cada `VIN` por fecha y usando `shift(-1)` se trae la fecha de la **siguiente** visita
-a la fila actual:
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 
-```
-Dias_Hasta_Retorno = (F. Entrada de la siguiente visita) - (F. Cierre de la visita actual)
+pip install -r requirements.txt
 ```
 
-Las visitas que no tienen una siguiente (el último ingreso de cada vehículo) se
-descartan, porque no tienen respuesta que aprender.
+### Linux / macOS
 
-> 27.697 visitas → **15.196 registros entrenables** (mediana: 67 días, media: 135,5 días)
+```bash
+git clone https://github.com/alexnitro32-lab/Trabajo-de-Dataops.git
+cd "Trabajo-de-Dataops"
 
-### características
-- `Antiguedad_Vehiculo` = año de la visita − año del modelo.
-- `Es_Vehiculo_Vendido` = bandera 0/1 derivada de si la **primera** OT del chasis fue
-  un alistamiento de vehículo nuevo (indicio de que el concesionario lo vendió).
+python3 -m venv .venv
+source .venv/bin/activate
 
-También se aplican tres filtros de sanidad, todos contra errores de digitación del
-sistema del taller: se eliminan retornos negativos, antigüedades negativas y
-kilometrajes imposibles (la base traía valores como `123.456.789`, que distorsionaban
-la media y la desviación calculadas por el `StandardScaler` y con ello toda la escala
-de la variable `Kms.`).
+pip install -r requirements.txt
+```
 
----
-
-## El pipeline de Machine Learning
-
-| Tipo de variable | Columnas | Tratamiento |
-|---|---|---|
-| Numéricas | `Kms.`, `Antiguedad_Vehiculo` | `SimpleImputer(median)` → `StandardScaler` |
-| Categóricas | `Gama`, `Tipo Cargo`, `Tipo de Trabajo` | `SimpleImputer(most_frequent)` → `OneHotEncoder(handle_unknown="ignore")` |
-| Binarias | `Es_Vehiculo_Vendido` | `SimpleImputer(most_frequent)` |
-
-- **Estimador:** `RandomForestRegressor(n_estimators=100, random_state=42)`
-- **División:** 80 % entrenamiento / 20 % test, con semilla fija (reproducibilidad)
-- **Serialización:** se guarda el **Pipeline completo**, no solo el estimador
-
-el `.joblib` incluye el
-`ColumnTransformer`. Gracias a eso, la API **no reimplementa ni una línea** del
-preprocesamiento, lo que elimina el riesgo de *training/serving skew* (que los datos
-se preparen distinto al entrenar y al predecir).
+> **¿`Activate.ps1` te dio error de permisos en Windows?** Ejecuta esto una sola vez y vuelve a intentar:
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
 
 ---
 
-## Resultados obtenidos
+## Prenderlo
 
-Métricas reales sobre el 20 % de test (datos nunca vistos por el modelo):
+```bash
+uvicorn main:app --reload
+```
 
-| Métrica | Valor | Interpretación |
-|---|---|---|
-| MAE | **119,23 días** | Desfase promedio entre lo predicho y el retorno real |
-| RMSE | **209,86 días** | Muy superior al MAE: hay casos con errores extremos |
-| R² | **−0,0580** | El modelo aún **no supera** a predecir siempre el promedio |
+Abre **<http://127.0.0.1:8000/docs>** en el navegador. Vas a ver la documentación interactiva: puedes probar cada endpoint desde ahí sin escribir código.
 
-Sobre 15.190 visitas con retorno registrado, tras aplicar los filtros de sanidad.
-
-### Lectura honesta de estos números
-
-El R² negativo indica que, con las variables disponibles, el modelo todavía no captura
-el fenómeno. Esto **no es un fallo del pipeline** sino un hallazgo del negocio: el
-momento en que un cliente regresa depende de factores que hoy no están en el dataset
-(hábitos de uso, campañas de mercadeo, siniestros, garantías vencidas), y la variable
-objetivo tiene una dispersión enorme (mediana 67 días frente a media 135,5).
-
-El objetivo declarado del Hito 1 es tener el **ciclo de vida completo funcionando y
-reproducible**, y ese objetivo se cumple. La mejora del desempeño predictivo queda
-como trabajo del siguiente hito:
-
-- Incorporar variables de historial (número de visitas previas, kilómetros/mes, valor facturado).
-- Transformar el objetivo con logaritmo o discretizarlo en rangos (0-3 meses, 3-6, 6+).
-- Probar modelos de gradient boosting y ajustar hiperparámetros con validación cruzada.
-
----
-
-## La API REST
-
-| Método | Ruta | Función |
-|---|---|---|
-| `GET` | `/` | Health check: confirma que el servicio vive y que el modelo y el catálogo cargaron |
-| `POST` | `/predict` | Recibe los datos del vehículo a mano y devuelve los días estimados |
-| `GET` | `/predict/vin/{vin}` | Busca el vehículo por chasis, autocompleta sus datos y predice |
-| `GET` | `/docs` | Documentación interactiva Swagger UI (autogenerada) |
-
-### Predicción manual — `POST /predict`
-
-**Contrato de entrada** (validado por Pydantic con la clase `SolicitudVehiculo`):
+Para confirmar que el modelo cargó bien, entra a <http://127.0.0.1:8000/> y deberías ver:
 
 ```json
 {
-  "Gama": "Tucson",
-  "Tipo Cargo": "Cliente",
-  "Tipo de Trabajo": "MECANICA",
-  "Kms.": 45000.0,
-  "Año Modelo": 2022,
-  "Es_Vehiculo_Vendido": true
+  "mensaje": "API de Retención Predictiva de Automotor.co S.A.S. activa 🚗",
+  "modelo_cargado": true,
+  "catalogo_cargado": true,
+  "vehiculos_en_catalogo": 9729
 }
 ```
 
-Se pide el **año del modelo** (el de la tarjeta de propiedad) y no la antigüedad,
-porque es el dato que el asesor tiene a la vista. La API traduce año → antigüedad
-internamente, replicando el mismo cálculo con que se entrenó el modelo. El campo
-está acotado entre 1990 y el año entrante: fuera de ese rango la API responde `422`,
-porque el modelo nunca vio antigüedades mayores a 29 años.
+Si `modelo_cargado` sale en `false`, ve a [Problemas comunes](#problemas-comunes).
 
-**Respuesta:**
+---
 
-```json
-{
-  "prediccion_dias_retorno": 128.4,
-  "unidad": "días"
-}
+## Ejemplo de uso real
+
+### Opción A — consultar por chasis (VIN)
+
+Si el vehículo ya estuvo en el taller, basta el número de chasis. La API completa el resto sola.
+
+```bash
+curl http://127.0.0.1:8000/predict/vin/ADM130850
 ```
 
-### Predicción por chasis — `GET /predict/vin/{vin}`
-
-Cuando el vehículo ya tiene historial en el taller, el asesor no necesita escribir
-nada: basta el VIN. La API busca la ficha en el catálogo congelado
-(`models/catalogo_vehiculos.joblib`, 9.729 vehículos), autocompleta las seis
-características y llama al **mismo modelo**.
-
-> **El VIN nunca entra al modelo.** Es solo la llave de búsqueda. Un identificador
-> único no es un predictor: codificar 9.729 chasis produciría un modelo que memoriza
-> cada carro en vez de aprender el patrón, y que no sabría nada de un vehículo nuevo.
-
-Ejemplo — `GET /predict/vin/ADM130850`:
+**Respuesta real:**
 
 ```json
 {
@@ -205,67 +106,127 @@ Ejemplo — `GET /predict/vin/ADM130850`:
     "ultima_visita": "2020-02-18",
     "vendido_por_nosotros": false
   },
-  "prediccion_dias_retorno": 102.4,
+  "prediccion_dias_retorno": 267.4,
   "unidad": "días"
 }
 ```
 
-La respuesta devuelve también los datos encontrados, para que el asesor pueda
-verificar que el sistema buscó el vehículo correcto antes de confiar en la cifra.
+Devuelve también los datos que encontró, para que el asesor confirme que buscó el carro correcto antes de creerle a la cifra.
 
-**Manejo de errores:**
+### Opción B — ingresar los datos a mano
 
-| Código | Cuándo ocurre |
-|---|---|
-| `422` | Pydantic rechaza el JSON (falta un campo, llega texto donde va un número, o el año del modelo está fuera de rango) |
-| `404` | El VIN consultado no tiene historial en el taller |
-| `500` | Falta el `.joblib` del modelo o del catálogo: hay que ejecutar `python -m src.train` primero |
-| `400` | Error inesperado durante la inferencia |
+Para un vehículo sin historial en el taller:
 
----
+```bash
+curl -X POST http://127.0.0.1:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Gama": "Tucson",
+    "Tipo Cargo": "Cliente",
+    "Tipo de Trabajo": "MECANICA",
+    "Kms.": 45000.0,
+    "Año Modelo": 2022,
+    "Es_Vehiculo_Vendido": true
+  }'
+```
 
-## Reproducción del proyecto paso a paso
+**Respuesta real:**
+
+```json
+{
+  "prediccion_dias_retorno": 484.9,
+  "unidad": "días"
+}
+```
+
+En **PowerShell**, `curl` es otra cosa. Usa esto:
 
 ```powershell
-# 1. Clonar el repositorio y entrar a la carpeta
-git clone <url-del-repositorio>
-cd "Trabajo de Dataops"
-
-# 2. Crear y activar el entorno virtual
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1        # Windows PowerShell
-# source .venv/bin/activate         # Linux / macOS
-
-# 3. Instalar dependencias
-pip install -r requirements.txt
-
-# 4. Entrenar el modelo y congelarlo en models/
-python -m src.train
-
-# 5. Auditar el código y ejecutar las pruebas
-python -m ruff check .
-python -m pytest
-
-# 6. Levantar la API en local
-uvicorn main:app --reload
+Invoke-RestMethod -Uri http://127.0.0.1:8000/predict -Method Post -ContentType "application/json" -Body '{
+  "Gama": "Tucson",
+  "Tipo Cargo": "Cliente",
+  "Tipo de Trabajo": "MECANICA",
+  "Kms.": 45000.0,
+  "Año Modelo": 2022,
+  "Es_Vehiculo_Vendido": true
+}'
 ```
 
 ---
 
-## Calidad e integración continua
+## Correr las pruebas
 
-El workflow `.github/workflows/ci.yml` se dispara en cada `push` y `pull_request`
-a `main`, levanta una máquina Ubuntu limpia con Python 3.12 y ejecuta:
+```bash
+python -m pytest
+```
 
-1. `pip install -r requirements.txt` — reconstruye el entorno desde cero
-2. `python -m ruff check .` — inspección estática de código
-3. `python -m src.train` — reentrena el modelo (valida la reproducibilidad end-to-end)
-4. `python -m pytest` — ejecuta las 6 pruebas de la API
+Esperado: **7 passed**.
 
-Si cualquier paso falla, el commit queda marcado en rojo. Esto garantiza que el
-proyecto funciona en una máquina distinta a la del autor.
+Para revisar el estilo del código:
 
-**Estado actual verificado en local:** `ruff` sin hallazgos, **6/6 pruebas pasando**.
+```bash
+python -m ruff check .
+```
+
+Esperado: **All checks passed!**
 
 ---
 
+## Reentrenar el modelo
+
+El repositorio ya trae el modelo entrenado en `models/`, así que **no necesitas entrenar para usar la API**. Pero si cambias el CSV o el código de `src/`, reentrena con:
+
+```bash
+python -m src.train
+```
+
+Tarda unos segundos y sobrescribe los dos archivos de `models/`. Al final imprime las métricas de evaluación.
+
+---
+
+## Problemas comunes
+
+| Síntoma | Causa | Solución |
+|---|---|---|
+| `modelo_cargado: false` en `/` | Faltan los `.joblib` de `models/` | `python -m src.train` |
+| `ModuleNotFoundError: No module named 'fastapi'` | El entorno virtual no está activo | Actívalo y repite `pip install -r requirements.txt` |
+| `ModuleNotFoundError: No module named 'src'` | Estás parado en otra carpeta | `cd` a la raíz del proyecto (donde está `main.py`) |
+| `Activate.ps1 cannot be loaded` | Política de ejecución de PowerShell | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+| `404` al consultar un VIN | Ese chasis no tiene historial | Usa `POST /predict` e ingresa los datos a mano |
+| `InconsistentVersionWarning` de scikit-learn | Tu versión difiere de la que creó el `.joblib` | `python -m src.train` para regenerarlo |
+
+---
+
+## Endpoints disponibles
+
+| Método | Ruta | Para qué sirve |
+|---|---|---|
+| `GET` | `/` | Confirma que el servicio vive y que el modelo cargó |
+| `POST` | `/predict` | Predice con datos ingresados a mano |
+| `GET` | `/predict/vin/{vin}` | Predice buscando el vehículo por chasis |
+| `GET` | `/docs` | Documentación interactiva (Swagger UI) |
+
+El detalle de cada contrato está en **[ARQUITECTURA.md](ARQUITECTURA.md)**.
+
+---
+
+## Estado actual del modelo
+
+Seamos claros sobre qué tan bien predice, porque importa para saber en qué confiar:
+
+| Métrica | Valor |
+|---|---|
+| MAE (error promedio) | **122,7 días** |
+| R² | **−0,096** |
+
+Un R² negativo significa que el modelo **todavía no le gana a simplemente decir el promedio**. En la práctica: la cifra sirve como referencia gruesa, no para tomar decisiones comerciales sobre un cliente específico.
+
+Esto no es un bug del pipeline — es un hallazgo del negocio. El momento en que un cliente vuelve depende de cosas que hoy no están en los datos (si quedó conforme con el servicio, el precio que pagó, si lo atendieron rápido). El razonamiento completo y el plan de mejora están en **[ARQUITECTURA.md](ARQUITECTURA.md#6-qué-le-falta-y-qué-mejoraría)**.
+
+---
+
+## Documentación técnica
+
+¿Quieres entender cómo funciona por dentro, qué hace cada archivo y por qué se tomó cada decisión?
+
+👉 **[ARQUITECTURA.md](ARQUITECTURA.md)**
