@@ -1,0 +1,427 @@
+{
+  "umbral_fuga_dias": 365,
+  "visitas_consolidadas": 23430,
+  "dataset_regresion": {
+    "filas": 8938,
+    "vehiculos": 2450
+  },
+  "dataset_fuga": {
+    "filas": 11189,
+    "vehiculos": 3309,
+    "tasa_de_fuga": 0.26472428277772814
+  },
+  "diagnostico_ritmos": {
+    "medida_1_primer_ingreso": {
+      "descripcion": "Vehiculo nuevo: de la entrega al primer ingreso a taller",
+      "vehiculos_entregados": 3799,
+      "volvieron_alguna_vez": 1581,
+      "nunca_volvieron": 2218,
+      "tasa_de_regreso_pct": 41.6,
+      "dias": {
+        "n": 1581,
+        "p10": 14.0,
+        "p25": 52.0,
+        "mediana": 165.0,
+        "media": 202.303605313093,
+        "p75": 305.0,
+        "p90": 414.0
+      },
+      "km_recorridos": {
+        "n": 1552,
+        "p10": 0.0,
+        "p25": 243.25,
+        "mediana": 5071.5,
+        "media": 5873.070231958763,
+        "p75": 9733.75,
+        "p90": 10489.2
+      },
+      "llegan_antes_de_365_dias_pct": 82.2,
+      "llegan_antes_de_10000_km_pct": 77.4,
+      "manda_el_kilometraje": 648,
+      "manda_el_calendario": 904
+    },
+    "medida_2_vendidos_con_historia": {
+      "descripcion": "Vendido por nosotros, ya con historia: cada cuanto vuelve",
+      "vehiculos": 759,
+      "intervalos_observados": 1677,
+      "dias": {
+        "n": 1677,
+        "p10": 21.0,
+        "p25": 58.0,
+        "mediana": 139.0,
+        "media": 170.08228980322005,
+        "p75": 233.0,
+        "p90": 361.0
+      },
+      "km_recorridos": {
+        "n": 1649,
+        "p10": 3.8000000000000114,
+        "p25": 1475.0,
+        "mediana": 5086.0,
+        "media": 5500.7744087325655,
+        "p75": 8076.0,
+        "p90": 10220.6
+      },
+      "vuelve_dentro_de_365_dias_pct": 90.4
+    },
+    "medida_3_externos_con_historia": {
+      "descripcion": "Externo que volvio una 2a vez: cada cuanto vuelve",
+      "vehiculos": 1886,
+      "intervalos_observados": 7759,
+      "dias": {
+        "n": 7759,
+        "p10": 11.0,
+        "p25": 31.0,
+        "mediana": 79.0,
+        "media": 139.72818662198736,
+        "p75": 183.5,
+        "p90": 327.0
+      },
+      "km_recorridos": {
+        "n": 7514,
+        "p10": 628.8000000000004,
+        "p25": 2827.0,
+        "mediana": 5577.0,
+        "media": 12006.484162895928,
+        "p75": 9775.75,
+        "p90": 19347.899999999998
+      },
+      "vuelve_dentro_de_365_dias_pct": 92.4
+    },
+    "cobertura_por_origen": {
+      "vendidos_por_nosotros": {
+        "vehiculos": 3799,
+        "con_una_sola_visita": 2218,
+        "con_una_sola_visita_pct": 58.4,
+        "predecibles": 1581
+      },
+      "externos": {
+        "vehiculos": 5490,
+        "con_una_sola_visita": 2575,
+        "con_una_sola_visita_pct": 46.9,
+        "predecibles": 2915
+      }
+    },
+    "demora_en_taller_dias": {
+      "n": 23430,
+      "p10": 0.0,
+      "p25": 0.0,
+      "mediana": 0.0,
+      "media": 10.455911224925309,
+      "p75": 9.0,
+      "p90": 34.0
+    }
+  },
+  "regresion": {
+    "referencias_sin_modelo": {
+      "mediana_constante": {
+        "MAE_dias": 107.88308346386216,
+        "RMSE_dias": 186.2149557197842,
+        "R2_score": -0.09262122110683402
+      },
+      "regla_preventiva_365d_10000km": {
+        "MAE_dias": 129.51743587877834,
+        "RMSE_dias": 196.43484453877898,
+        "R2_score": -0.2158431994541845
+      },
+      "ritmo_mediano_del_propio_vin": {
+        "MAE_dias": 105.01532781382859,
+        "RMSE_dias": 196.32147987834782,
+        "R2_score": -0.21444025203794337
+      }
+    },
+    "validacion_cruzada_por_vin": {
+      "media_MAE_dias": 100.4007329481756,
+      "desv_MAE_dias": 1.7273963936018917,
+      "media_RMSE_dias": 167.51446978346127,
+      "desv_RMSE_dias": 3.4874961746395434,
+      "media_R2_score": 0.1148004027976092,
+      "desv_R2_score": 0.011730814674152101
+    },
+    "holdout_agrupado_por_vin": {
+      "MAE_dias": 98.38459956425149,
+      "RMSE_dias": 163.2850832618602,
+      "R2_score": 0.09013972922033364
+    }
+  },
+  "clasificacion_fuga": {
+    "modelo_elegido": "RandomForest",
+    "comparacion": {
+      "RandomForest": {
+        "global": {
+          "AUC": 0.7238835878011393,
+          "PR_AUC": 0.4773447950483559,
+          "precision": 0.44855091730922625,
+          "recall": 0.5695476029709655,
+          "F1": 0.5018592890078833,
+          "verdaderos_negativos": 6153,
+          "falsos_positivos": 2074,
+          "falsos_negativos": 1275,
+          "verdaderos_positivos": 1687,
+          "tasa_falsos_positivos": 0.2520967545885499,
+          "tasa_falsos_negativos": 0.43045239702903443,
+          "umbral_decision": 0.5
+        },
+        "global_sobre_vendidos": {
+          "AUC": 0.7153418935456121,
+          "PR_AUC": 0.484034043967958,
+          "precision": 0.44565217391304346,
+          "recall": 0.5833333333333334,
+          "F1": 0.5052816901408451,
+          "verdaderos_negativos": 985,
+          "falsos_positivos": 357,
+          "falsos_negativos": 205,
+          "verdaderos_positivos": 287,
+          "tasa_falsos_positivos": 0.2660208643815201,
+          "tasa_falsos_negativos": 0.4166666666666667,
+          "umbral_decision": 0.5
+        },
+        "segmentado_sobre_vendidos": {
+          "AUC": 0.7131685204705995,
+          "PR_AUC": 0.469918405768777,
+          "precision": 0.46214511041009465,
+          "recall": 0.5955284552845529,
+          "F1": 0.5204262877442274,
+          "verdaderos_negativos": 1001,
+          "falsos_positivos": 341,
+          "falsos_negativos": 199,
+          "verdaderos_positivos": 293,
+          "tasa_falsos_positivos": 0.2540983606557377,
+          "tasa_falsos_negativos": 0.40447154471544716,
+          "umbral_decision": 0.5
+        },
+        "global_sobre_externos": {
+          "AUC": 0.7256899790955519,
+          "PR_AUC": 0.47649968561702283,
+          "precision": 0.4491498235482836,
+          "recall": 0.5668016194331984,
+          "F1": 0.5011634150706998,
+          "verdaderos_negativos": 5168,
+          "falsos_positivos": 1717,
+          "falsos_negativos": 1070,
+          "verdaderos_positivos": 1400,
+          "tasa_falsos_positivos": 0.24938271604938272,
+          "tasa_falsos_negativos": 0.4331983805668016,
+          "umbral_decision": 0.5
+        },
+        "segmentado_sobre_externos": {
+          "AUC": 0.7250392656687806,
+          "PR_AUC": 0.47076630975651207,
+          "precision": 0.4444796954314721,
+          "recall": 0.5672064777327935,
+          "F1": 0.4983991462113127,
+          "verdaderos_negativos": 5134,
+          "falsos_positivos": 1751,
+          "falsos_negativos": 1069,
+          "verdaderos_positivos": 1401,
+          "tasa_falsos_positivos": 0.254320987654321,
+          "tasa_falsos_negativos": 0.43279352226720647,
+          "umbral_decision": 0.5
+        }
+      },
+      "HistGradientBoosting": {
+        "global": {
+          "AUC": 0.7164076273615958,
+          "PR_AUC": 0.46851922807584095,
+          "precision": 0.43235147279081376,
+          "recall": 0.5847400405131667,
+          "F1": 0.4971297359357061,
+          "verdaderos_negativos": 5953,
+          "falsos_positivos": 2274,
+          "falsos_negativos": 1230,
+          "verdaderos_positivos": 1732,
+          "tasa_falsos_positivos": 0.27640695271666466,
+          "tasa_falsos_negativos": 0.4152599594868332,
+          "umbral_decision": 0.5
+        },
+        "global_sobre_vendidos": {
+          "AUC": 0.7129171058849189,
+          "PR_AUC": 0.4695281079512629,
+          "precision": 0.43032159264931086,
+          "recall": 0.5711382113821138,
+          "F1": 0.4908296943231441,
+          "verdaderos_negativos": 970,
+          "falsos_positivos": 372,
+          "falsos_negativos": 211,
+          "verdaderos_positivos": 281,
+          "tasa_falsos_positivos": 0.27719821162444114,
+          "tasa_falsos_negativos": 0.42886178861788615,
+          "umbral_decision": 0.5
+        },
+        "segmentado_sobre_vendidos": {
+          "AUC": 0.6813676044733621,
+          "PR_AUC": 0.4098020492777704,
+          "precision": 0.4198019801980198,
+          "recall": 0.43089430894308944,
+          "F1": 0.42527582748244735,
+          "verdaderos_negativos": 1049,
+          "falsos_positivos": 293,
+          "falsos_negativos": 280,
+          "verdaderos_positivos": 212,
+          "tasa_falsos_positivos": 0.21833084947839046,
+          "tasa_falsos_negativos": 0.5691056910569106,
+          "umbral_decision": 0.5
+        },
+        "global_sobre_externos": {
+          "AUC": 0.7172391721720927,
+          "PR_AUC": 0.4690887955734648,
+          "precision": 0.4327467939158962,
+          "recall": 0.5874493927125506,
+          "F1": 0.49836853855401,
+          "verdaderos_negativos": 4983,
+          "falsos_positivos": 1902,
+          "falsos_negativos": 1019,
+          "verdaderos_positivos": 1451,
+          "tasa_falsos_positivos": 0.2762527233115468,
+          "tasa_falsos_negativos": 0.4125506072874494,
+          "umbral_decision": 0.5
+        },
+        "segmentado_sobre_externos": {
+          "AUC": 0.7113158923788439,
+          "PR_AUC": 0.4569454405052382,
+          "precision": 0.43089430894308944,
+          "recall": 0.5578947368421052,
+          "F1": 0.48623853211009177,
+          "verdaderos_negativos": 5065,
+          "falsos_positivos": 1820,
+          "falsos_negativos": 1092,
+          "verdaderos_positivos": 1378,
+          "tasa_falsos_positivos": 0.2643427741466957,
+          "tasa_falsos_negativos": 0.4421052631578947,
+          "umbral_decision": 0.5
+        }
+      },
+      "ExtraTrees": {
+        "global": {
+          "AUC": 0.7234701420784169,
+          "PR_AUC": 0.4758528231450053,
+          "precision": 0.43837389953392025,
+          "recall": 0.5715732613099257,
+          "F1": 0.49618991793669404,
+          "verdaderos_negativos": 6058,
+          "falsos_positivos": 2169,
+          "falsos_negativos": 1269,
+          "verdaderos_positivos": 1693,
+          "tasa_falsos_positivos": 0.2636440986994044,
+          "tasa_falsos_negativos": 0.42842673869007425,
+          "umbral_decision": 0.5
+        },
+        "global_sobre_vendidos": {
+          "AUC": 0.7124097330764664,
+          "PR_AUC": 0.4674619613768638,
+          "precision": 0.4185714285714286,
+          "recall": 0.5955284552845529,
+          "F1": 0.49161073825503354,
+          "verdaderos_negativos": 935,
+          "falsos_positivos": 407,
+          "falsos_negativos": 199,
+          "verdaderos_positivos": 293,
+          "tasa_falsos_positivos": 0.30327868852459017,
+          "tasa_falsos_negativos": 0.40447154471544716,
+          "umbral_decision": 0.5
+        },
+        "segmentado_sobre_vendidos": {
+          "AUC": 0.7126672058449348,
+          "PR_AUC": 0.4731819164960864,
+          "precision": 0.44875776397515527,
+          "recall": 0.5873983739837398,
+          "F1": 0.5088028169014085,
+          "verdaderos_negativos": 987,
+          "falsos_positivos": 355,
+          "falsos_negativos": 203,
+          "verdaderos_positivos": 289,
+          "tasa_falsos_positivos": 0.26453055141579734,
+          "tasa_falsos_negativos": 0.41260162601626016,
+          "umbral_decision": 0.5
+        },
+        "global_sobre_externos": {
+          "AUC": 0.7256627533304519,
+          "PR_AUC": 0.4774585340381585,
+          "precision": 0.44275774826059455,
+          "recall": 0.5668016194331984,
+          "F1": 0.4971590909090909,
+          "verdaderos_negativos": 5123,
+          "falsos_positivos": 1762,
+          "falsos_negativos": 1070,
+          "verdaderos_positivos": 1400,
+          "tasa_falsos_positivos": 0.255918663761801,
+          "tasa_falsos_negativos": 0.4331983805668016,
+          "umbral_decision": 0.5
+        },
+        "segmentado_sobre_externos": {
+          "AUC": 0.7236055909843319,
+          "PR_AUC": 0.4727964596285144,
+          "precision": 0.43807480073574495,
+          "recall": 0.5785425101214575,
+          "F1": 0.49860432658757853,
+          "verdaderos_negativos": 5052,
+          "falsos_positivos": 1833,
+          "falsos_negativos": 1041,
+          "verdaderos_positivos": 1429,
+          "tasa_falsos_positivos": 0.2662309368191721,
+          "tasa_falsos_negativos": 0.42145748987854253,
+          "umbral_decision": 0.5
+        }
+      }
+    },
+    "punto_de_operacion": [
+      {
+        "umbral": 0.3,
+        "precision": 0.329,
+        "recall": 0.905,
+        "F1": 0.483,
+        "alertas_emitidas": 8142,
+        "llamadas_innecesarias": 5462,
+        "clientes_perdidos_sin_alerta": 282
+      },
+      {
+        "umbral": 0.4,
+        "precision": 0.377,
+        "recall": 0.766,
+        "F1": 0.505,
+        "alertas_emitidas": 6022,
+        "llamadas_innecesarias": 3754,
+        "clientes_perdidos_sin_alerta": 694
+      },
+      {
+        "umbral": 0.5,
+        "precision": 0.449,
+        "recall": 0.57,
+        "F1": 0.502,
+        "alertas_emitidas": 3761,
+        "llamadas_innecesarias": 2074,
+        "clientes_perdidos_sin_alerta": 1275
+      },
+      {
+        "umbral": 0.6,
+        "precision": 0.512,
+        "recall": 0.36,
+        "F1": 0.423,
+        "alertas_emitidas": 2083,
+        "llamadas_innecesarias": 1016,
+        "clientes_perdidos_sin_alerta": 1895
+      },
+      {
+        "umbral": 0.7,
+        "precision": 0.589,
+        "recall": 0.194,
+        "F1": 0.292,
+        "alertas_emitidas": 978,
+        "llamadas_innecesarias": 402,
+        "clientes_perdidos_sin_alerta": 2386
+      }
+    ],
+    "importancias_top10": {
+      "num__Dias_Desde_Visita_Ant": 0.0932,
+      "num__Ritmo_Max_Previo": 0.0921,
+      "num__Ritmo_Mediano_Previo": 0.0876,
+      "num__Kms.": 0.0705,
+      "num__Ciclos_10k_Acumulados": 0.0696,
+      "num__Num_Visita": 0.0673,
+      "num__Km_Sobre_Umbral_10k": 0.0672,
+      "num__Km_Por_Dia": 0.0668,
+      "num__Km_Desde_Visita_Ant": 0.066,
+      "num__Km_Por_Dia_Medio": 0.0646
+    }
+  }
+}

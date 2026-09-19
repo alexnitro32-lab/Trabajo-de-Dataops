@@ -24,3 +24,6 @@ Thumbs.db
 # NOTA: data/ y models/ SI se versionan a proposito.
 # El CI de GitHub Actions necesita el CSV para reentrenar, y el .joblib
 # es un entregable explicito del Hito 1.
+
+# Guia personal de estadistica: material de estudio propio, no del entregable.
+GUIA_ESTADISTICA.md
