@@ -1,17 +1,18 @@
 # Predicción de Retención en Concesionario Automotriz
 
-Una API que predice **cuándo vuelve un cliente al taller** y **si va a dejar de volver**, a partir del historial de órdenes de trabajo del concesionario.
+Una API que, en el momento en que un vehículo ingresa al concesionario, predice **cuándo va a volver**, **si el cliente va a dejar de volver** y **entre qué fechas hay que llamarlo**, a partir del historial de órdenes de trabajo.
 
 ## ¿Qué problema resuelve?
 
-El taller no sabe cuándo va a regresar cada cliente. Sin eso no se puede planear cuántas bahías se van a necesitar, qué repuestos comprar, ni a quién llamar antes de que se lo lleve la competencia.
+El concesionario no sabe cuándo va a regresar cada cliente. Sin eso no se puede planear cuántas bahías se van a necesitar, qué repuestos comprar, ni a quién llamar antes de que se lo lleve la competencia.
 
-El proyecto responde dos preguntas, y son distintas:
+El proyecto responde tres preguntas:
 
-> **1.** Un vehículo acaba de salir del taller. ¿En cuántos días volverá?
+> **1.** Este vehículo acaba de ingresar. ¿En cuántos días volverá?
 > **2.** ¿Este cliente va a dejar de volver?
+> **3.** ¿Cuándo hay que llamarlo?
 
-La primera sirve para **agendar y dimensionar**. La segunda dispara la **acción comercial**: a quién llamar antes de perderlo. Son dos modelos separados porque son dos preguntas separadas.
+La primera sirve para **agendar y dimensionar**. La segunda dispara la **acción comercial**: a quién retener antes de perderlo. La tercera convierte las dos anteriores en una **instrucción concreta para el asesor**. Las dos primeras son dos modelos separados porque son dos preguntas distintas; la tercera combina sus resultados con el plan de mantenimiento de fábrica.
 
 La unidad de predicción es el **chasis (VIN)**, que en esta base equivale al cliente. Lo que se usa para predecir es su conducta observada — cada cuánto viene volviendo, cuántos kilómetros hace por día, cuánto lleva sin aparecer — y no la gama del vehículo. El porqué está en [ARQUITECTURA.md](ARQUITECTURA.md#el-sujeto-el-chasis-no-la-gama).
 
@@ -21,14 +22,16 @@ La unidad de predicción es el **chasis (VIN)**, que en esta base equivale al cl
 
 | Modelo | Pregunta | Métrica | Resultado |
 |---|---|---|---|
-| Regresión | ¿En cuántos días vuelve? | MAE · R² | 100,4 días · R² = +0,115 |
-| **Clasificación** | ¿Va a dejar de volver? | **AUC** · PR-AUC | **0,724** · 0,477 |
+| Regresión | ¿En cuántos días vuelve? | MAE · R² | 100,5 días · R² = +0,115 |
+| **Clasificación** | ¿Va a dejar de volver? | **AUC** · PR-AUC | **0,727** · 0,481 |
 
-**La clasificación de fuga es la que se recomienda para operar.** Un AUC de 0,724 ordena bien a los clientes por riesgo y sirve para priorizar llamadas; la regresión le gana a las referencias sin modelo, pero por poco margen, y no alcanza para decidir sobre un cliente concreto. La evidencia completa está en [ARQUITECTURA.md § 6](ARQUITECTURA.md#6-qué-le-falta-y-qué-mejoraría), y se recalcula en cada entrenamiento dentro de `models/metricas_entrenamiento.json`.
+**La clasificación de fuga es la más confiable para operar.** Un AUC de 0,727 ordena bien a los clientes por riesgo y sirve para priorizar llamadas. La regresión le gana a las referencias sin modelo, pero por poco margen: su error medio es de unos 98 días. Por eso la API no entrega un solo día sino una **ventana de llamada** del ancho de ese error, y nunca agenda al cliente después de la fecha en que le toca el mantenimiento según su plan de fábrica.
+
+La evidencia completa está en [ARQUITECTURA.md § 6](ARQUITECTURA.md#6-qué-le-falta-y-qué-mejoraría) y se recalcula en cada entrenamiento dentro de `models/metricas_entrenamiento.json`.
 
 Dos hallazgos del diagnóstico que cambian cómo se lee el negocio:
 
-- **De 3.799 vehículos entregados, solo 1.581 volvieron alguna vez (41,6 %).** Los otros 2.218 nunca regresaron después del alistamiento: son clientes que ya compraron y que el taller nunca capturó.
+- **De 3.799 vehículos entregados, solo 1.581 volvieron alguna vez (41,6 %).** Los otros 2.218 nunca regresaron después del alistamiento: son clientes que ya compraron y que el concesionario nunca capturó.
 - **El vehículo nuevo no vuelve al año: vuelve a los 165 días de mediana.** La mitad aparece antes de los seis meses, así que programar la primera llamada para el mes 12 llega tarde para medio parque.
 
 ---
@@ -75,146 +78,137 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-Abre **<http://127.0.0.1:8000/docs>** en el navegador. Vas a ver la documentación interactiva: puedes probar cada endpoint desde ahí sin escribir código.
+Abre **<http://127.0.0.1:8000/docs>** en el navegador. Vas a ver la documentación interactiva: puedes probar la API desde ahí sin escribir código.
 
-Para confirmar que todo cargó bien, entra a <http://127.0.0.1:8000/> y deberías ver:
+Para confirmar que todo cargó bien, abre **<http://127.0.0.1:8000/>** — la dirección raíz, sin `/docs` al final. El navegador muestra directamente este JSON:
 
 ```json
 {
-  "mensaje": "API de Retención Predictiva de Automotor.co S.A.S. activa 🚗",
+  "mensaje": "API de Retención Predictiva del concesionario activa 🚗",
   "modelo_cargado": true,
   "modelo_fuga_cargado": true,
   "algoritmo_fuga": "RandomForest",
-  "modelos_fuga_por_origen": ["externos", "vendidos"],
-  "catalogo_cargado": true,
-  "vehiculos_en_catalogo": 9289,
-  "vehiculos_predecibles": 4496,
-  "regla_preventiva": "365 días o 10000 km",
-  "umbral_fuga_dias": 365
+  "historial_cargado": true,
+  "vehiculos_en_historial": 9289,
+  "margen_error_dias": 98.4,
+  "fecha_corte_datos": "2026-06-30"
 }
 ```
 
-Si `modelo_cargado` sale en `false`, ve a [Problemas comunes](#problemas-comunes).
+También se puede ver desde `/docs`: despliega **`GET /` — Estado del servicio**, da clic en **Try it out** y luego en **Execute**.
+
+Si `modelo_cargado` o `historial_cargado` salen en `false`, ve a [Problemas comunes](#problemas-comunes).
 
 ---
 
 ## Cómo se usa
 
-### Opción A — consultar por chasis (VIN)
+La API tiene un solo endpoint de predicción: **`POST /predict/vin/{vin}/ingreso`**. Se usa cuando el vehículo ingresa al concesionario. El asesor envía el chasis, el kilometraje y para qué vino; la API agrega esa visita a las que el vehículo ya tenía, recalcula su historia y vuelve a predecir. **No hace falta reentrenar ni esperar a que el ingreso llegue a la base de datos.**
 
-Si el vehículo ya estuvo en el taller, basta el número de chasis. La API completa el resto sola.
+1. Abre <http://127.0.0.1:8000/docs>.
+2. Despliega **`POST /predict/vin/{vin}/ingreso`** y da clic en **Try it out**.
+3. Escribe el VIN, por ejemplo `DEU822806`.
+4. En *Request body* pega:
+   ```json
+   {
+     "kilometraje": 20400,
+     "tipo_cargo": "Cliente",
+     "tipo_trabajo": "MECANICA"
+   }
+   ```
+5. Da clic en **Execute**.
 
-```bash
-curl http://127.0.0.1:8000/predict/vin/ADM130850
-```
+### Qué se envía
+
+| Campo | Obligatorio | Valores | Para qué sirve |
+|---|---|---|---|
+| `kilometraje` | **Sí** | Número entre 0 y 500.000 | Odómetro con el que entra. No puede ser menor que el de la visita anterior |
+| `tipo_cargo` | No (`Cliente`) | `Cliente`, `Garantia`, `Seguros`, `Interno` | Quién paga la visita |
+| `tipo_trabajo` | No (`MECANICA`) | `MECANICA`, `COLISION`, `MECANICA Y COLISION`, `OTRO` | Qué se le hace. Un mantenimiento normal es `Cliente` + `MECANICA` |
+| `fecha_ingreso` | No (hoy) | `AAAA-MM-DD` | Día en que entró. No puede ser futura ni anterior a su último ingreso registrado |
+| `fecha_entrega` | No (= ingreso) | `AAAA-MM-DD` | Día en que se entrega o se espera entregar. El regreso se cuenta desde aquí |
+
+### Qué se recibe
 
 ```json
 {
-  "vin": "ADM130850",
+  "vin": "DEU822806",
   "datos_encontrados": {
-    "gama": "I10",
-    "anio_modelo": 2013,
-    "antiguedad_calculada": 7.0,
-    "ultimo_kilometraje": 487636.0,
-    "ultima_visita": "2020-02-18",
+    "gama": "Tucson",
+    "anio_modelo": 2014,
+    "antiguedad_calculada": 12.0,
+    "ultimo_kilometraje_visita_concesionario": 20400.0,
+    "ultima_visita_concesionario": "2026-10-19",
     "vendido_por_nosotros": false,
-    "total_visitas": 55,
-    "ritmo_habitual_dias": 14.5,
-    "km_por_dia": 160.7
+    "total_visitas": 3,
+    "ritmo_habitual_dias": 576.0,
+    "km_por_dia": 6.6
   },
-  "prediccion_dias_retorno": 28.2,
-  "unidad": "días",
-  "origen_estimacion": "modelo",
-  "regla_preventiva_dias": 62.2,
+  "prediccion_dias_retorno": 180.0,
   "riesgo_de_fuga": {
-    "probabilidad_fuga": 0.5127,
-    "alerta": true,
-    "segmento": "externos",
-    "probabilidad_fuga_modelo_del_segmento": 0.525
-  }
-}
-```
-
-La respuesta trae `datos_encontrados` para que el asesor confirme que la API buscó el carro correcto antes de creerle a la cifra, y `regla_preventiva_dias` al lado de la predicción: la brecha entre lo que dice el plan de fábrica y lo que dice el modelo es información.
-
-> **Vehículos de un solo ingreso.** Si el chasis solo ha venido una vez, no existe ningún intervalo observado del cual estimar su ritmo. La API lo declara (`"origen_estimacion": "regla_preventiva"` más una `advertencia`) y devuelve la regla de fábrica, en lugar de disfrazar de predicción personalizada lo que sería la mediana de la población.
-
-### Opción B — ingresar los datos a mano
-
-```bash
-curl -X POST http://127.0.0.1:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "Tipo Cargo": "Cliente",
-    "Tipo de Trabajo": "MECANICA",
-    "Kms.": 45000.0,
-    "Año Modelo": 2022,
-    "Es_Vehiculo_Vendido": true,
-    "Visitas_Previas": 3,
-    "Dias_Desde_Visita_Anterior": 180.0,
-    "Kms_Visita_Anterior": 32000.0
-  }'
-```
-
-```json
-{
-  "prediccion_dias_retorno": 196.6,
-  "unidad": "días",
-  "regla_preventiva_dias": 138.5,
-  "vehiculo_atrasado_frente_a_regla": true,
-  "riesgo_de_fuga": {
-    "probabilidad_fuga": 0.5762,
-    "alerta": true,
-    "segmento": "vendidos",
-    "probabilidad_fuga_modelo_del_segmento": 0.5524
-  }
-}
-```
-
-Los tres últimos campos del envío son la **historia del vehículo** y son obligatorios: son los datos que más pesan en la predicción. Sin ellos la API responde `422` en lugar de devolver un número sin fundamento.
-
-En **PowerShell**, `curl` es otra cosa. Usa esto:
-
-```powershell
-Invoke-RestMethod -Uri http://127.0.0.1:8000/predict -Method Post -ContentType "application/json" -Body '{
-  "Tipo Cargo": "Cliente",
-  "Tipo de Trabajo": "MECANICA",
-  "Kms.": 45000.0,
-  "Año Modelo": 2022,
-  "Es_Vehiculo_Vendido": true,
-  "Visitas_Previas": 3,
-  "Dias_Desde_Visita_Anterior": 180.0,
-  "Kms_Visita_Anterior": 32000.0
-}'
-```
-
-### Opción C — ¿este cliente se va a ir?
-
-```bash
-curl http://127.0.0.1:8000/fuga/vin/ADM130850
-```
-
-```json
-{
-  "vin": "ADM130850",
-  "riesgo_de_fuga": {
-    "algoritmo": "RandomForest",
-    "probabilidad_fuga": 0.5127,
-    "alerta": true,
-    "segmento": "externos",
-    "probabilidad_fuga_modelo_del_segmento": 0.525
+    "probabilidad_fuga": 0.7758,
+    "alerta": true
   },
-  "historia_que_lo_sustenta": {
-    "total_visitas": 55,
-    "ritmo_habitual_dias": 14.5,
-    "dias_desde_visita_anterior": 24.0,
-    "km_por_dia": 160.7,
-    "vendido_por_nosotros": false
+  "plan_de_llamada": {
+    "estado": "llamar_ahora",
+    "mensaje": "Riesgo alto de fuga (78%): no esperar a la ventana. Dejarle agendada la próxima cita al entregarle el carro (su ventana normal sería del 2027-01-09 al 2027-07-24).",
+    "fecha_referencia": "2026-10-19",
+    "fecha_estimada_retorno": "2027-04-17",
+    "margen_error_dias": 98.4,
+    "fecha_corte_datos": "2026-06-30",
+    "base_de_la_fecha": "Plan de mantenimiento: cumple 180 días (plan 6 meses o 5.000 km, modelos 2021 o anteriores), antes que los 319 días que estima el modelo por su historia."
   }
 }
 ```
 
-Devuelve dos probabilidades — la del modelo global y la del modelo del segmento al que pertenece el vehículo — y la **historia que sustenta la cifra**, porque un asesor no puede llamar a un cliente con un número sin contexto. Un chasis de un solo ingreso responde `409`: sin un segundo ingreso no hay ritmo contra el cual comparar.
+| Campo | Qué es |
+|---|---|
+| `datos_encontrados` | Ficha del vehículo **ya con la visita de hoy**, para que el asesor confirme que la API encontró el carro correcto |
+| `ritmo_habitual_dias` | Cada cuánto suele volver: la mediana de los días entre sus visitas |
+| `km_por_dia` | Cuánto lo usa: la mediana de los km por día entre sus visitas |
+| `prediccion_dias_retorno` | Días hasta el próximo ingreso, contados desde la entrega |
+| `riesgo_de_fuga` | Probabilidad de que no vuelva en 365 días, y si supera el umbral de alerta (0,50) |
+| `plan_de_llamada.estado` | `programar`, `llamar_ahora` o `llamar_ya` (ver abajo) |
+| `plan_de_llamada.mensaje` | La instrucción para el asesor, con las fechas |
+| `fecha_estimada_retorno` | Entrega + días predichos |
+| `margen_error_dias` | Error medio del modelo; define el ancho de la ventana de llamada |
+| `fecha_corte_datos` | Último día que trae la base de datos. Lo que pasó después solo lo conoce la API si se registra en la petición |
+| `base_de_la_fecha` | Si la fecha salió del modelo o del plan de mantenimiento, y por qué |
+
+### Cómo se calcula la fecha estimada
+
+Se toma **lo que ocurra primero** entre dos cosas:
+
+1. **Lo que estima el modelo** a partir de la historia del vehículo.
+2. **Lo que exige el plan de mantenimiento de fábrica**, según el año del modelo:
+
+| Año del modelo | Plan |
+|---|---|
+| 2022 en adelante | 365 días o 10.000 km, lo que ocurra primero |
+| 2021 o anteriores (o año desconocido) | 6 meses (180 días) o 5.000 km, lo que ocurra primero |
+
+Los kilómetros se convierten en días con los km/día del vehículo. Un carro 2015 que hace 100 km/día cumple 5.000 km en 50 días, y ese es su tope aunque el modelo diga más.
+
+### Cómo se decide cuándo llamar
+
+La **ventana de llamada** va de `fecha estimada − margen de error` a `fecha estimada + margen de error`, y nunca empieza antes de la entrega.
+
+| Estado | Significa |
+|---|---|
+| `programar` | La ventana todavía no abre. El mensaje dice entre qué fechas llamar |
+| `llamar_ahora` | Hoy está dentro de la ventana, **o** el cliente tiene alerta de fuga |
+| `llamar_ya` | La ventana ya cerró y no hay registro de que volviera: está atrasado |
+
+**Regla de fuga:** si el modelo de fuga enciende la alerta, no se espera a que abra la ventana. Si el carro todavía está en el concesionario, el mensaje pide dejarle agendada la próxima cita al entregárselo.
+
+### Errores que puede devolver
+
+| Código | Cuándo |
+|---|---|
+| `404` | El VIN no tiene historial: sería su primer ingreso y no hay ritmo del que estimar su regreso |
+| `409` | La fecha de ingreso es igual o anterior al último ingreso registrado |
+| `422` | Un dato no es válido: kilometraje menor que el de la visita anterior, tipo de trabajo inexistente, texto donde va un número o fechas incoherentes |
+| `500` | Faltan los archivos del modelo o del historial |
 
 ---
 
@@ -222,13 +216,11 @@ Devuelve dos probabilidades — la del modelo global y la del modelo del segment
 
 | Método | Ruta | Para qué sirve |
 |---|---|---|
+| `POST` | `/predict/vin/{vin}/ingreso` | Registra el ingreso y predice regreso, fuga y fechas de llamada |
 | `GET` | `/` | Confirma que el servicio vive y que los modelos cargaron |
-| `POST` | `/predict` | Predice con datos ingresados a mano |
-| `GET` | `/predict/vin/{vin}` | Predice buscando el vehículo por chasis |
-| `GET` | `/fuga/vin/{vin}` | Probabilidad de que ese cliente deje de volver |
 | `GET` | `/docs` | Documentación interactiva (Swagger UI) |
 
-El contrato completo de cada uno — campos, rangos válidos y códigos de error — está en [ARQUITECTURA.md § 5](ARQUITECTURA.md#5-qué-recibe-y-devuelve-la-api).
+El contrato completo está en [ARQUITECTURA.md § 5](ARQUITECTURA.md#5-qué-recibe-y-devuelve-la-api).
 
 ---
 
@@ -238,7 +230,7 @@ El contrato completo de cada uno — campos, rangos válidos y códigos de error
 python -m pytest
 ```
 
-Esperado: **37 passed**.
+Esperado: **45 passed**.
 
 Para revisar el estilo del código:
 
@@ -252,15 +244,27 @@ GitHub Actions corre en cada push esa misma secuencia en una máquina limpia: `r
 
 ---
 
+## Actualizar los datos sin reentrenar
+
+Cuando llega una base nueva del ERP, reemplaza el CSV en `data/` y corre:
+
+```bash
+python -m src.actualizar_catalogo
+```
+
+Tarda segundos. Reconstruye el historial de visitas y el catálogo de vehículos que consulta la API, **sin tocar los modelos**: lo que cambia de un día para otro son las visitas, no la relación que aprendió el modelo. Reinicia la API después para que tome los datos nuevos.
+
+---
+
 ## Reentrenar el modelo
 
-El repositorio ya trae los modelos entrenados en `models/`, así que **no necesitas entrenar para usar la API**. Si cambias el CSV o el código de `src/`:
+El repositorio ya trae los modelos entrenados en `models/`, así que **no necesitas entrenar para usar la API**. Si cambias el código de `src/` o quieres que el modelo aprenda de una base mucho más grande:
 
 ```bash
 python -m src.train
 ```
 
-Tarda unos minutos (valida de forma cruzada, así que entrena varias veces) y escribe cinco archivos en `models/`: los tres modelos, el catálogo de vehículos y `metricas_entrenamiento.json` con toda la evidencia numérica.
+Tarda un par de minutos (valida de forma cruzada, así que entrena varias veces) y escribe seis archivos en `models/`: los tres modelos, el catálogo, el historial de visitas y `metricas_entrenamiento.json` con toda la evidencia numérica.
 
 ---
 
@@ -269,8 +273,10 @@ Tarda unos minutos (valida de forma cruzada, así que entrena varias veces) y es
 | Síntoma | Causa probable | Solución |
 |---|---|---|
 | `modelo_cargado: false` | Los `.joblib` no existen | `python -m src.train` |
-| `409` al consultar fuga | El chasis tiene un solo ingreso | No es calculable; usa `POST /predict` con la historia a mano |
-| `422` en `POST /predict` | Falta la historia del vehículo | Envía `Visitas_Previas` y `Dias_Desde_Visita_Anterior` |
+| `historial_cargado: false` | Falta `models/historial_visitas.joblib` | `python -m src.actualizar_catalogo` |
+| `/docs` muestra una versión vieja | Hay otro `uvicorn` corriendo en el puerto 8000, o el navegador guardó la página | Cierra todas las terminales con `uvicorn`, abre una sola y recarga con **Ctrl + F5** |
+| `404` con un VIN que sí vino | Su ingreso aún no está en la base | Actualiza los datos con `python -m src.actualizar_catalogo` |
+| `422` por kilometraje | El odómetro enviado es menor que el de la visita anterior | Verifica el kilometraje con el asesor |
 | `Activate.ps1` no ejecuta | Política de ejecución de Windows | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
 
 ---

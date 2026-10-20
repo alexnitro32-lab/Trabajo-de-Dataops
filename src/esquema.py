@@ -333,7 +333,7 @@ def validar_catalogo(catalogo: pd.DataFrame) -> pd.DataFrame:
     if faltantes:
         raise ContratoDeDatosError(
             f"Al catalogo le faltan columnas que el modelo si consume: {faltantes}.\n"
-            f"El entrenamiento funcionaria, pero el endpoint /predict/vin fallaria en "
+            f"El entrenamiento funcionaria, pero el endpoint de ingreso fallaria en "
             f"produccion. Revise construir_catalogo_vehiculos() en src/data.py."
         )
     return verificar_volumen(catalogo, config.MINIMO_VEHICULOS_CATALOGO, "catalogo de vehiculos")

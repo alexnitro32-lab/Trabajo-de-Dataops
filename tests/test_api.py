@@ -4,38 +4,44 @@
 # sin que nadie tenga que abrir el navegador a probar a mano.
 # Se ejecutan con:  python -m pytest
 
+from datetime import date, timedelta
+
 import joblib
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient   # Cliente falso que llama a la API sin levantar Uvicorn
 
+import main
 from main import app                        # Importamos la aplicacion real que queremos probar
-from src import config, data, diagnostico, esquema, evaluate, features
+from src import config, data, diagnostico, esquema, evaluate
 
 # TestClient simula un navegador: hace peticiones HTTP reales contra "app"
 # en memoria. Por eso las pruebas corren en segundos y funcionan en GitHub
 # Actions, donde no hay nadie abriendo un navegador.
 client = TestClient(app)
 
-# Peticion valida completa, reutilizada por varias pruebas. Incluye la historia
-# del vehiculo, que es obligatoria: sin ella no se puede estimar el ritmo de
-# ingreso de ese chasis en particular.
-PAYLOAD_VALIDO = {
-    "Tipo Cargo": "Cliente",
-    "Tipo de Trabajo": "MECANICA",
-    "Kms.": 45000.0,
-    "Año Modelo": 2022,          # El usuario escribe el anio, la API calcula la antiguedad
-    "Es_Vehiculo_Vendido": True,
-    "Visitas_Previas": 3,
-    "Dias_Desde_Visita_Anterior": 180.0,
-    "Kms_Visita_Anterior": 32000.0,
-}
-
-
 @pytest.fixture(scope="module")
 def catalogo():
     """Catalogo de vehiculos congelado, cargado una sola vez para todo el modulo."""
     return joblib.load(config.RUTA_CATALOGO_VEHICULOS)
+
+
+@pytest.fixture(scope="module")
+def historial():
+    """Todas las visitas por VIN: lo que la API usa para recalcular la historia."""
+    return joblib.load(config.RUTA_HISTORIAL_VISITAS)
+
+
+def _ultimo_ingreso(historial, vin):
+    return historial[historial[config.COLUMNA_VIN] == vin].sort_values(config.COLUMNA_FECHA_ENTRADA).iloc[-1]
+
+
+def _ingresar(historial, vin, km_extra=1500.0, **extra):
+    """Registra un ingreso HOY con un odometro coherente con la visita anterior."""
+    ultima = _ultimo_ingreso(historial, vin)
+    km = ultima[config.COLUMNA_KMS]
+    kms = float(km) + km_extra if pd.notna(km) and km < config.KMS_MAXIMO_VALIDO - km_extra else 10000.0
+    return client.post(f"/predict/vin/{vin}/ingreso", json={"kilometraje": kms, **extra})
 
 
 def test_health_check():
@@ -49,206 +55,218 @@ def test_health_check():
     data_resp = response.json()                # Convertimos la respuesta JSON en diccionario
     assert "mensaje" in data_resp              # El contrato de salida debe incluir el mensaje
     assert data_resp["modelo_cargado"] is True # Confirma que el .joblib se cargo correctamente
-    assert data_resp["catalogo_cargado"] is True
+    assert data_resp["historial_cargado"] is True
     # El servicio expone DOS modelos: el que dice cuando vuelve el vehiculo y el
     # que dice si va a dejar de volver.
     assert data_resp["modelo_fuga_cargado"] is True
     assert data_resp["algoritmo_fuga"] in config.MODELOS_CLASIFICACION
-
-    # No todos los chasis del catalogo son predecibles: los de un solo ingreso
-    # no tienen intervalo observado. El health check debe reportar cuantos si.
-    assert 0 < data_resp["vehiculos_predecibles"] <= data_resp["vehiculos_en_catalogo"]
+    assert data_resp["vehiculos_en_historial"] > 0
 
 
-def test_prediccion_exitosa():
-    """Verifica que el endpoint /predict retorne un cálculo numérico válido."""
-    response = client.post("/predict", json=PAYLOAD_VALIDO)
-
-    assert response.status_code == 200
-    data_resp = response.json()
-    assert isinstance(data_resp["prediccion_dias_retorno"], float)
-    assert data_resp["prediccion_dias_retorno"] >= 0   # No existen retornos negativos
-    assert data_resp["unidad"] == "días"
-
-    # La regla de fabrica (365 dias o 10.000 km) viaja al lado de la prediccion
-    # para que el asesor tenga una referencia contra la cual juzgarla.
-    assert data_resp["regla_preventiva_dias"] <= config.REGLA_MANTENIMIENTO_DIAS
-
-    # Y la segunda pregunta: ¿se va a ir? Debe llegar como probabilidad valida.
-    riesgo = data_resp["riesgo_de_fuga"]
-    assert 0.0 <= riesgo["probabilidad_fuga"] <= 1.0
-    assert riesgo["segmento"] == "vendidos"      # el payload dice que lo vendimos nosotros
-    assert isinstance(riesgo["alerta"], bool)
+def test_solo_existe_el_endpoint_de_ingreso():
+    """La consulta sin ingreso se retiró: toda predicción parte de una visita registrada."""
+    rutas = {r.path for r in app.routes if "predict" in getattr(r, "path", "")}
+    assert rutas == {"/predict/vin/{vin}/ingreso"}
 
 
-def test_modelo_solo_consume_columnas_declaradas():
-    """El modelo consume exactamente las columnas declaradas en config, y solo esas.
-
-    El sujeto de la predicción es el CLIENTE, identificado por su chasis, y lo que
-    la determina es su conducta observada. Un campo que describa el modelo del
-    vehículo no entra al estimador: si llega en la petición, se ignora y la
-    predicción no cambia. Si alguien conecta una variable sin declararla en
-    config, esta prueba falla.
-    """
-    base = client.post("/predict", json=PAYLOAD_VALIDO).json()
-    con_extra = client.post("/predict", json={**PAYLOAD_VALIDO, "Gama": "Tucson"}).json()
-    assert base["prediccion_dias_retorno"] == con_extra["prediccion_dias_retorno"]
-
-    # El vector que arma la API tiene que coincidir con el que espera el pipeline.
-    declaradas = set(config.COLUMNAS_NUMERICAS + config.COLUMNAS_CATEGORICAS + config.COLUMNAS_BINARIAS)
-    assert set(features.columnas_modelo()) == declaradas
-
-
-def test_historia_obligatoria_422():
-    """Verifica que una petición sin la historia del vehículo sea rechazada.
-
-    Es la prueba que fija la decisión de diseño: el modelo se apoya en cada
-    cuánto venía volviendo el chasis. Aceptar la petición sin ese dato
-    devolvería la mediana de la población disfrazada de predicción individual.
-    """
-    payload = {k: v for k, v in PAYLOAD_VALIDO.items()
-               if k not in ("Visitas_Previas", "Dias_Desde_Visita_Anterior")}
-    assert client.post("/predict", json=payload).status_code == 422
-
-
-def test_validacion_pydantic_error_422():
-    """Verifica que Pydantic rechace datos con tipos incorrectos (HTTP 422)."""
-    # Prueba del "camino triste": faltan campos obligatorios y ademas se envia
-    # texto donde debe ir un numero. Probar los errores es tan importante como
-    # probar el exito: garantiza que la API no acepte basura silenciosamente.
-    payload_invalido = {
-        "Gama": "Tucson",
-        "Kms.": "cinco_mil"  # Enviar texto en lugar de número debe fallar
-    }
-    response = client.post("/predict", json=payload_invalido)
-
-    # 422 = "Unprocessable Entity": la peticion llego bien pero los datos no
-    # cumplen el contrato. Es la respuesta que FastAPI genera por si solo.
-    assert response.status_code == 422
-
-
-def test_anio_modelo_fuera_de_rango_422():
-    """Verifica que un año de modelo imposible sea rechazado por los límites ge/le."""
-    # El modelo se entreno con antiguedades reales del parque. Un carro de 1800
-    # obligaria a extrapolar donde nunca hubo datos, asi que Pydantic lo corta.
-    response = client.post("/predict", json={**PAYLOAD_VALIDO, "Año Modelo": 1800})
-    assert response.status_code == 422
-
-
-def test_prediccion_por_vin_exitosa(catalogo):
-    """Verifica que al consultar un VIN con historia se autocompleten los datos y prediga."""
-    # Tomamos un chasis con historia real en la base del taller, en vez de
-    # fijar un VIN a mano: si manana ese carro sale de la base, la prueba
-    # seguiria siendo valida.
+def test_ingreso_exitoso(catalogo, historial):
+    """Con el ingreso de hoy el carro suma una visita y se vuelve a predecir."""
     vin = str(catalogo[catalogo["Apto_Para_Modelo"]].index[0])
-    response = client.get(f"/predict/vin/{vin}")
+    response = _ingresar(historial, vin, tipo_cargo="Cliente", tipo_trabajo="MECANICA")
 
     assert response.status_code == 200
     data_resp = response.json()
     assert data_resp["vin"] == vin
     assert isinstance(data_resp["prediccion_dias_retorno"], float)
 
-    # Con historia suficiente, la estimacion debe venir del MODELO y no de la
-    # regla de fabrica. Es lo que separa una prediccion de un valor por defecto.
-    assert data_resp["origen_estimacion"] == "modelo"
-
-    # La API debe devolver tambien la ficha encontrada, para que el asesor
-    # pueda confirmar que el sistema busco el vehiculo correcto.
     ficha = data_resp["datos_encontrados"]
-    assert "gama" in ficha and "ultimo_kilometraje" in ficha
-    assert ficha["total_visitas"] >= config.MINIMO_VISITAS_POR_VIN
+    assert ficha["total_visitas"] == int(catalogo.loc[vin, "Total_Visitas"]) + 1
+    assert ficha["ultima_visita_concesionario"] == str(date.today())
 
-
-def test_vin_de_una_sola_visita_no_se_predice(catalogo):
-    """Verifica que un chasis con un único ingreso NO reciba una predicción del modelo.
-
-    Sin un segundo ingreso no hay ningún intervalo observado, así que no se
-    puede saber cada cuánto vuelve ese carro. La API debe decirlo explícitamente
-    y devolver la regla preventiva, en lugar de disfrazar de predicción
-    personalizada lo que en realidad sería la mediana de la población.
-    """
-    sin_historia = catalogo[~catalogo["Apto_Para_Modelo"]]
-    if len(sin_historia) == 0:
-        pytest.skip("No hay vehículos de una sola visita en el catálogo actual.")
-
-    response = client.get(f"/predict/vin/{sin_historia.index[0]}")
-
-    assert response.status_code == 200
-    data_resp = response.json()
-    assert data_resp["origen_estimacion"] == "regla_preventiva"
-    assert data_resp["prediccion_dias_retorno"] == pytest.approx(data_resp["regla_preventiva_dias"])
-    assert "advertencia" in data_resp
-    assert data_resp["datos_encontrados"]["total_visitas"] == 1
-
-
-def test_riesgo_de_fuga_por_vin(catalogo):
-    """El endpoint de fuga devuelve probabilidad y la historia que la sustenta."""
-    vin = str(catalogo[catalogo["Apto_Para_Modelo"]].index[0])
-    response = client.get(f"/fuga/vin/{vin}")
-
-    assert response.status_code == 200
-    data_resp = response.json()
+    # El riesgo de fuga viaja solo con lo que el asesor usa: probabilidad y alerta.
     riesgo = data_resp["riesgo_de_fuga"]
+    assert set(riesgo) == {"probabilidad_fuga", "alerta"}
     assert 0.0 <= riesgo["probabilidad_fuga"] <= 1.0
-    assert riesgo["umbral_dias"] == config.UMBRAL_FUGA_DIAS
-    assert riesgo["segmento"] in ("vendidos", "externos")
-
-    # El negocio pidió poder actuar distinto sobre cada origen, así que la
-    # respuesta trae también la lectura del modelo entrenado solo con ese grupo.
-    assert 0.0 <= riesgo["probabilidad_fuga_modelo_del_segmento"] <= 1.0
-
-    # Un asesor no puede llamar a un cliente basándose en un número sin contexto:
-    # la respuesta debe decir POR QUÉ el modelo cree que se va a ir.
-    historia = data_resp["historia_que_lo_sustenta"]
-    assert historia["total_visitas"] >= config.MINIMO_VISITAS_POR_VIN
+    assert isinstance(riesgo["alerta"], bool)
 
 
-def test_riesgo_de_fuga_sin_historia_409(catalogo):
-    """Un chasis de un solo ingreso no tiene riesgo de fuga calculable.
+def test_estructura_de_respuesta(catalogo, historial):
+    """La respuesta tiene exactamente los campos acordados con el negocio, ni uno más."""
+    vin = str(catalogo[catalogo["Apto_Para_Modelo"]].index[0])
+    data_resp = _ingresar(historial, vin).json()
 
-    No hay ningún intervalo observado contra el cual comparar su ausencia.
-    Devolver un número sería inventarlo, así que la API responde 409 (conflicto
-    con el estado del recurso) y lo explica.
+    assert set(data_resp) == {
+        "vin", "datos_encontrados", "prediccion_dias_retorno", "riesgo_de_fuga", "plan_de_llamada",
+    }
+    assert set(data_resp["datos_encontrados"]) == {
+        "gama", "anio_modelo", "antiguedad_calculada",
+        "ultimo_kilometraje_visita_concesionario", "ultima_visita_concesionario",
+        "vendido_por_nosotros", "total_visitas", "ritmo_habitual_dias", "km_por_dia",
+    }
+    assert set(data_resp["plan_de_llamada"]) == {
+        "estado", "mensaje", "fecha_referencia", "fecha_estimada_retorno",
+        "margen_error_dias", "fecha_corte_datos", "base_de_la_fecha",
+    }
+
+
+def test_plan_de_llamada_ventana_con_mae(catalogo, historial):
+    """La ventana de llamada es el retorno estimado +/- el error medio del modelo.
+
+    El retorno se cuenta desde la ENTREGA, que es como se entrenó el target, y
+    el inicio de la ventana nunca puede quedar antes de esa entrega.
     """
+    vin = str(catalogo[catalogo["Apto_Para_Modelo"]].index[0])
+    entrega = date.today()
+    data_resp = _ingresar(historial, vin).json()
+    plan = data_resp["plan_de_llamada"]
+
+    retorno, desde, hasta = main._ventana_llamada(entrega, data_resp["prediccion_dias_retorno"])
+    mae = plan["margen_error_dias"]
+
+    assert plan["fecha_estimada_retorno"] == str(retorno)
+    assert mae is not None and mae > 0
+    assert (retorno - entrega).days == round(data_resp["prediccion_dias_retorno"])
+    assert entrega < desde <= retorno <= hasta
+    assert (hasta - retorno).days == round(mae)
+
+
+def test_plan_de_llamada_cambia_de_estado_con_la_fecha():
+    """Antes de la ventana se programa, dentro se llama, y después se llama ya."""
+    entrega, dias = date(2026, 1, 10), 200.0
+    _, desde, hasta = main._ventana_llamada(entrega, dias)
+
+    def estado(dia, riesgo=None):
+        return main._plan_de_llamada(entrega, dias, dia, riesgo)["estado"]
+
+    assert estado(desde - timedelta(days=1)) == "programar"
+    assert estado(desde) == "llamar_ahora"
+    assert estado(hasta) == "llamar_ahora"
+    assert estado(hasta + timedelta(days=1)) == "llamar_ya"
+
+    # Sin alerta de fuga la ventana manda; con alerta no se espera a que abra.
+    sin_alerta = {"probabilidad_fuga": 0.2, "alerta": False}
+    con_alerta = {"probabilidad_fuga": 0.8, "alerta": True}
+    assert estado(desde - timedelta(days=1), sin_alerta) == "programar"
+    assert estado(desde - timedelta(days=1), con_alerta) == "llamar_ahora"
+    # La alerta adelanta la llamada, pero no le quita el atraso a un vencido.
+    assert estado(hasta + timedelta(days=1), con_alerta) == "llamar_ya"
+
+
+def test_regla_de_fuga_en_la_api(catalogo, historial):
+    """Un vehículo con alerta de fuga nunca queda en "programar"."""
+    for vin in catalogo[catalogo["Apto_Para_Modelo"]].index[:30]:
+        data_resp = _ingresar(historial, vin).json()
+        if data_resp["riesgo_de_fuga"]["alerta"]:
+            assert data_resp["plan_de_llamada"]["estado"] != "programar"
+
+
+# ---------------------------------------------------------------------------
+# PLAN DE MANTENIMIENTO SEGUN EL AÑO DEL MODELO
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("anio,dias,kms", [
+    (2026, 365, 10_000), (2022, 365, 10_000),        # 2022 en adelante
+    (2021, 180, 5_000), (2014, 180, 5_000),          # 2021 o anteriores
+    (None, 180, 5_000),                              # año desconocido: plan corto
+])
+def test_plan_de_mantenimiento_por_anio(anio, dias, kms):
+    plan = main._plan_mantenimiento(anio)
+    assert (plan["dias"], plan["kms"]) == (dias, kms)
+
+
+def test_mantenimiento_lo_que_ocurra_primero():
+    """Gana el plazo en días o el kilometraje, el que se cumpla antes."""
+    # Uso bajo: 10 km/día tarda 500 días en hacer 5.000 km -> manda el plazo.
+    assert main._dias_hasta_mantenimiento(2015, 10.0)[0] == 180
+    # Uso alto: 100 km/día hace 5.000 km en 50 días -> manda el kilometraje.
+    assert main._dias_hasta_mantenimiento(2015, 100.0)[0] == pytest.approx(50)
+    # Mismo uso en un 2023: 10.000 km en 100 días.
+    assert main._dias_hasta_mantenimiento(2023, 100.0)[0] == pytest.approx(100)
+    # Sin km/día conocidos solo cuenta el plazo.
+    assert main._dias_hasta_mantenimiento(2023, None)[0] == 365
+
+
+def test_prediccion_nunca_supera_el_plan_de_mantenimiento(catalogo, historial):
+    """No se agenda a nadie después de que ya le tocaba el mantenimiento."""
+    for vin in catalogo[catalogo["Apto_Para_Modelo"]].index[:30]:
+        data_resp = _ingresar(historial, vin).json()
+        ficha = data_resp["datos_encontrados"]
+        tope, _ = main._dias_hasta_mantenimiento(ficha["anio_modelo"], ficha["km_por_dia"])
+        # Tolerancia del 1%: los km/día de la respuesta vienen redondeados a un
+        # decimal, así que el tope recalculado aquí difiere en décimas.
+        assert data_resp["prediccion_dias_retorno"] <= tope * 1.01 + 0.1, vin
+
+
+# ---------------------------------------------------------------------------
+# COHERENCIA CON EL ENTRENAMIENTO Y VALIDACIONES DEL INGRESO
+# ---------------------------------------------------------------------------
+
+def test_historial_reproduce_el_catalogo(catalogo, historial):
+    """Recalcular desde el historial da EXACTAMENTE la ficha del catálogo.
+
+    Es la garantía de que el endpoint del ingreso usa las mismas fórmulas que
+    el entrenamiento: si se desalinean, esta prueba falla antes de que el
+    asesor reciba una predicción calculada distinto.
+    """
+    for vin in catalogo[catalogo["Apto_Para_Modelo"]].index[:20]:
+        visitas_vin = historial[historial[config.COLUMNA_VIN] == vin]
+        recalculada = data.construir_catalogo_vehiculos(visitas_vin).loc[vin]
+        esperada = catalogo.loc[vin]
+        for columna in config.COLUMNAS_NUMERICAS + ["Total_Visitas", "Es_Vehiculo_Vendido"]:
+            a, b = recalculada[columna], esperada[columna]
+            assert (pd.isna(a) and pd.isna(b)) or a == pytest.approx(b), (vin, columna)
+
+
+def test_ingreso_vuelve_predecible_un_carro_de_una_visita(catalogo, historial):
+    """Un VIN con un solo ingreso gana su primer intervalo y pasa a usar el modelo."""
     sin_historia = catalogo[~catalogo["Apto_Para_Modelo"]]
     if len(sin_historia) == 0:
         pytest.skip("No hay vehículos de una sola visita en el catálogo actual.")
-    assert client.get(f"/fuga/vin/{sin_historia.index[0]}").status_code == 409
+    vin = str(sin_historia.index[0])
+
+    data_resp = _ingresar(historial, vin, km_extra=1000.0).json()
+    assert data_resp["datos_encontrados"]["total_visitas"] == 2
+    assert 0.0 <= data_resp["riesgo_de_fuga"]["probabilidad_fuga"] <= 1.0
+
+
+def test_ingreso_rechaza_datos_incoherentes(catalogo, historial):
+    """Odómetro que baja, fecha ya registrada o tipo de trabajo inexistente se rechazan."""
+    vin = str(catalogo[catalogo["Apto_Para_Modelo"] & catalogo["Kms."].notna()].index[0])
+    ultima = _ultimo_ingreso(historial, vin)
+    url = f"/predict/vin/{vin}/ingreso"
+
+    assert client.post(url, json={"kilometraje": float(ultima[config.COLUMNA_KMS]) - 1}).status_code == 422
+    fecha_vieja = str(pd.Timestamp(ultima[config.COLUMNA_FECHA_ENTRADA]).date())
+    assert client.post(url, json={"kilometraje": 400000, "fecha_ingreso": fecha_vieja}).status_code == 409
+    assert client.post(url, json={"kilometraje": 400000, "tipo_trabajo": "LAVADO"}).status_code == 422
+    # Pydantic rechaza un kilometraje que no es número.
+    assert client.post(url, json={"kilometraje": "cinco_mil"}).status_code == 422
 
 
 def test_vin_inexistente_404():
     """Verifica que un VIN sin historial responda 404 y no reviente el servicio."""
     # 404 = "el recurso no existe". Es distinto de un 500 (error del servidor):
     # aqui la API funciono bien, simplemente ese carro nunca vino al taller.
-    assert client.get("/predict/vin/NOEXISTE123").status_code == 404
-    assert client.get("/fuga/vin/NOEXISTE123").status_code == 404
+    assert client.post("/predict/vin/NOEXISTE123/ingreso", json={"kilometraje": 1000}).status_code == 404
 
 
-def test_vin_con_datos_incompletos_no_rompe(catalogo):
-    """Verifica que un chasis con año de modelo o kilometraje faltante responda
-    igual, en lugar de tumbar el endpoint con un error 500.
+def test_vin_con_datos_incompletos_no_rompe(catalogo, historial):
+    """Un chasis sin año de modelo responde igual, en lugar de tumbar el endpoint.
 
-    El historial del taller no esta completo: hay VIN sin año de modelo y sin
-    kilometraje. int(NaN) revienta y NaN genera un JSON invalido que ningun
-    cliente puede leer. Esta prueba deja fijado que esos casos se devuelven
-    como null y que la prediccion se sigue calculando.
+    El historial del taller no esta completo: hay VIN sin año de modelo. int(NaN)
+    revienta y NaN genera un JSON invalido que ningun cliente puede leer. Esta
+    prueba deja fijado que esos casos se devuelven como null, que la prediccion
+    se sigue calculando y que se aplica el plan corto de mantenimiento.
     """
-    incompletos = catalogo[catalogo["Anio_Modelo"].isna() | catalogo["Kms."].isna()]
-
-    # Si algun dia la base llega completa, no hay nada que probar aqui.
+    incompletos = catalogo[catalogo["Anio_Modelo"].isna()]
     if len(incompletos) == 0:
-        pytest.skip("El catálogo actual no tiene vehículos con datos faltantes.")
+        pytest.skip("El catálogo actual no tiene vehículos sin año de modelo.")
 
-    response = client.get(f"/predict/vin/{incompletos.index[0]}")
-
+    response = _ingresar(historial, str(incompletos.index[0]))
     assert response.status_code == 200
     data_resp = response.json()            # .json() falla solo si el JSON es invalido
-    assert isinstance(data_resp["prediccion_dias_retorno"], float)
-
-    # El dato faltante debe viajar como null explicito, no como NaN ni como 0.
-    ficha = data_resp["datos_encontrados"]
-    assert ficha["anio_modelo"] is None or isinstance(ficha["anio_modelo"], int)
-    assert ficha["ultimo_kilometraje"] is None or isinstance(ficha["ultimo_kilometraje"], float)
+    assert data_resp["datos_encontrados"]["anio_modelo"] is None
+    assert data_resp["prediccion_dias_retorno"] <= config.PLAN_MANTENIMIENTO_ANTERIOR["dias"]
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +347,20 @@ def test_regla_preventiva_nunca_supera_365_dias(visitas):
     intensivos = df[df["Km_Por_Dia_Medio"] > config.REGLA_MANTENIMIENTO_KMS / config.REGLA_MANTENIMIENTO_DIAS]
     if len(intensivos) > 0:
         assert (intensivos["Regla_Preventiva_Dias"] < config.REGLA_MANTENIMIENTO_DIAS).all()
+
+
+def test_regla_preventiva_depende_del_anio_del_modelo(visitas):
+    """2022 en adelante: 365 días o 10.000 km. 2021, anteriores o sin año: 6 meses o 5.000 km."""
+    df = data.agregar_features_historia(visitas)
+    nuevos = df[df[config.COLUMNA_ANO] >= config.ANIO_DESDE_PLAN_NUEVO]
+    anteriores = df[~(df[config.COLUMNA_ANO] >= config.ANIO_DESDE_PLAN_NUEVO)]
+
+    assert nuevos["Regla_Preventiva_Dias"].max() <= config.PLAN_MANTENIMIENTO_NUEVO["dias"]
+    assert anteriores["Regla_Preventiva_Dias"].max() <= config.PLAN_MANTENIMIENTO_ANTERIOR["dias"]
+    # Un carro anterior a 2022 que hace 100 km/día cumple los 5.000 km en 50 días.
+    rapidos = anteriores[anteriores["Km_Por_Dia_Medio"].between(99, 101)]
+    if len(rapidos) > 0:
+        assert rapidos["Regla_Preventiva_Dias"].between(49, 51).all()
 
 
 # ---------------------------------------------------------------------------

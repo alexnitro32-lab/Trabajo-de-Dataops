@@ -13,7 +13,7 @@ Este proyecto toma la base transaccional de órdenes de trabajo de un taller aut
 | Regresión | ¿En cuántos días vuelve este vehículo? | Agendar, dimensionar bahías, planear repuestos |
 | Clasificación de fuga | ¿Este cliente va a dejar de volver? | Priorizar a quién llamar antes de perderlo |
 
-Ambos se congelan en disco y se exponen como una **API REST**, todo respaldado por pruebas automáticas e integración continua.
+Ambos se congelan en disco y se exponen como una **API REST** con un solo endpoint de predicción: el asesor registra el ingreso del vehículo y recibe cuándo volverá, si se va a ir y **entre qué fechas hay que llamarlo**. Todo respaldado por pruebas automáticas e integración continua.
 
 **La unidad de predicción es el chasis (VIN), que en esta base equivale al cliente** — no la gama ni el modelo del vehículo. Es una decisión de planteamiento con consecuencias en todo el pipeline, justificada en la [sección 4](#el-sujeto-el-chasis-no-la-gama).
 
@@ -25,7 +25,7 @@ Lo que logra, concretamente:
 - **Decisiones de modelado respaldadas por evidencia.** Cada entrenamiento recalcula el diagnóstico, la comparación de tres algoritmos y el contraste global contra segmentado, y deja todo en `models/metricas_entrenamiento.json`.
 - **Verificación automática en cada push.** GitHub Actions reconstruye el entorno desde cero, reentrena y corre las pruebas en una máquina limpia.
 
-Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 11,5 % de la variabilidad. La clasificación de fuga sí llega a un nivel utilizable (AUC 0,724), y es la que se recomienda para operar. Ver [sección 6](#6-qué-le-falta-y-qué-mejoraría).
+Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 11,5 % de la variabilidad; por eso la API entrega una ventana del ancho de su error medio en vez de un día. La clasificación de fuga sí llega a un nivel utilizable (AUC 0,727), y es la que se recomienda para operar. Ver [sección 6](#6-qué-le-falta-y-qué-mejoraría).
 
 ---
 
@@ -66,8 +66,8 @@ Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 
             │
             ▼
    ┌─────────────────────┐  agregar_features_historia()
-   │  HISTORIA POR VIN   │  ritmo previo, km/día, regla 365 d / 10.000 km
-   └─────────────────────┘
+   │  HISTORIA POR VIN   │  ritmo previo, km/día, regla del plan por año
+   └─────────────────────┘  (2022+: 365 d / 10.000 km · ≤2021: 180 d / 5.000 km)
             │
             ├───────────────┬───────────────┬──────────────┐
             ▼               ▼               ▼              ▼
@@ -101,9 +101,12 @@ Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 
    └─────────────────────────────────────┘                 │
             │               │                              ▼
             ▼               ▼               models/catalogo_vehiculos.joblib
-   modelo_retencion    modelo_fuga.joblib
+   modelo_retencion    modelo_fuga.joblib   models/historial_visitas.joblib
       .joblib          modelos_fuga_segmentados.joblib
                        metricas_entrenamiento.json
+
+   src/actualizar_catalogo.py regenera SOLO el catálogo y el historial desde
+   un CSV nuevo, sin reentrenar: lo que cambia a diario son las visitas.
 
 
    ┌──────────────────────────────────────────────────────────────────┐
@@ -111,7 +114,7 @@ Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 
    │                 (online, mientras la API vive)                   │
    └──────────────────────────────────────────────────────────────────┘
 
-   Cliente (asesor / CRM / Swagger)
+   Asesor (Swagger / CRM): VIN + kilometraje + para qué vino
             │  HTTP
             ▼
    ┌─────────────────────┐
@@ -119,35 +122,38 @@ Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 
    │  API FastAPI        │
    └─────────────────────┘
             │
-            ├── POST /predict ──────► Pydantic valida (422 si no cumple)
-            │                              │
-            │                              ▼
-            │                    construir_fila_prediccion()
-            │                    mismas fórmulas del entrenamiento
-            │                              │
-            ├── GET /predict/vin/{vin} ──► busca en catálogo (404 si no está)
-            │                              │
-            │                              ▼
-            │                    ¿tiene 2+ ingresos?
-            │                      sí → copia su vector del catálogo
-            │                      no → regla 365 d / 10.000 km + advertencia
-            │                              │
-            ├── GET /fuga/vin/{vin} ─────► probabilidad de que NO vuelva
-            │                              (409 si el chasis no tiene historia)
-            │                              │
-            ▼                              ▼
+            └── POST /predict/vin/{vin}/ingreso
+                       │
+                       ▼
+             Pydantic valida el cuerpo (422 si no cumple)
+             busca las visitas del VIN en el historial (404 si no tiene)
+             valida fecha y odómetro contra su último ingreso (409 / 422)
+                       │
+                       ▼
+             data.ficha_con_ingreso_nuevo()
+             agrega la visita de hoy y recalcula la historia con
+             construir_catalogo_vehiculos(): las MISMAS fórmulas del entrenamiento
+                       │
+                       ▼
    ┌──────────────────────────────────────────────┐
    │  pipeline.predict(DataFrame de 1 fila)       │
+   │  modelo_fuga.predict_proba(misma fila)       │
    │  el MISMO preprocesamiento del entrenamiento │
    └──────────────────────────────────────────────┘
-            │
-            ▼
-   JSON: { "prediccion_dias_retorno": 28.2, "origen_estimacion": "modelo",
-           "regla_preventiva_dias": 62.2,
-           "riesgo_de_fuga": { "probabilidad_fuga": 0.51, "alerta": true } }
+                       │
+                       ▼
+             fecha = lo que ocurra primero entre el modelo y el plan
+                     de mantenimiento de su año de modelo
+             ventana de llamada = fecha ± MAE del modelo
+             alerta de fuga → no esperar a la ventana
+                       │
+                       ▼
+   JSON: { "prediccion_dias_retorno": 180.0,
+           "riesgo_de_fuga": { "probabilidad_fuga": 0.78, "alerta": true },
+           "plan_de_llamada": { "estado": "llamar_ahora", "mensaje": "…" } }
 ```
 
-**La clave del diagrama:** el bloque de preprocesamiento aparece una sola vez, dentro del `.joblib`. Las dos fases lo comparten físicamente. Eso es lo que elimina el *training/serving skew*.
+**La clave del diagrama:** el bloque de preprocesamiento aparece una sola vez, dentro del `.joblib`, y la historia del vehículo se calcula con una sola función, `construir_catalogo_vehiculos()`, tanto al entrenar como al servir. Las dos fases las comparten físicamente. Eso es lo que elimina el *training/serving skew*.
 
 ---
 
@@ -167,19 +173,21 @@ Trabajo de Dataops/
 │   ├── features.py                 ColumnTransformer: imputación, escalado, codificación
 │   ├── modelos.py                  Catálogo de estimadores a comparar
 │   ├── evaluate.py                 Métricas de regresión y de clasificación
-│   └── train.py                    Orquestador: diagnostica, compara, entrena y serializa
+│   ├── train.py                    Orquestador: diagnostica, compara, entrena y serializa
+│   └── actualizar_catalogo.py      Regenera catálogo e historial desde un CSV nuevo, sin reentrenar
 │
 ├── models/                         Artefactos congelados (salida de train.py)
 │   ├── modelo_retencion.joblib     Regresión: ¿en cuántos días vuelve?
 │   ├── modelo_fuga.joblib          Clasificación: ¿va a dejar de volver?
-│   ├── modelos_fuga_segmentados.joblib  Un clasificador por origen del vehículo
-│   ├── catalogo_vehiculos.joblib   Ficha + historia por VIN, para búsqueda por chasis
+│   ├── modelos_fuga_segmentados.joblib  Un clasificador por origen (evidencia; la API no lo usa)
+│   ├── catalogo_vehiculos.joblib   Ficha + historia de la última visita por VIN
+│   ├── historial_visitas.joblib    Todas las visitas por VIN: la API recalcula la historia con ellas
 │   └── metricas_entrenamiento.json Evidencia citable: diagnóstico, CV y comparaciones
 │
 ├── main.py                         API REST con FastAPI (capa online)
 │
 ├── tests/
-│   └── test_api.py                 37 pruebas de API, datos, contrato y métricas
+│   └── test_api.py                 45 pruebas de API, datos, contrato y métricas
 │
 ├── .github/workflows/ci.yml        CI: ruff → train → pytest
 ├── pyproject.toml                  Configuración de pytest y ruff
@@ -211,7 +219,8 @@ Trabajo de Dataops/
 - **`modelos.py`** es el catálogo de estimadores. Agregar o quitar un candidato a comparar es cambiar una entrada de un diccionario, sin tocar `train.py` ni la lógica de evaluación.
 - **`evaluate.py`** no conoce el modelo. Recibe dos vectores de números y devuelve un diccionario. Se puede reutilizar con cualquier otro modelo.
 - **`train.py`** es el director de orquesta: llama a los demás en orden y congela el resultado. No define lógica propia.
-- **`main.py`** no importa `train.py`. Solo `config.py`, `data.py` (para las fórmulas de servicio) y `features.py`. **Esa es la frontera entre entrenar y servir**, y está dibujada a propósito.
+- **`actualizar_catalogo.py`** es la mitad de `train.py` que cambia a diario: carga, valida y consolida el CSV y congela el catálogo y el historial, sin tocar los modelos.
+- **`main.py`** no importa `train.py`. Solo `config.py`, `data.py` (para recalcular la historia con las mismas fórmulas y aplicar el plan de mantenimiento) y `features.py`. **Esa es la frontera entre entrenar y servir**, y está dibujada a propósito.
 
 ---
 
@@ -226,9 +235,11 @@ La **gama tampoco entra**, y esa sí es una renuncia medible. En esta base está
 | Variables | AUC | PR-AUC |
 |---|---:|---:|
 | Con gama y antigüedad | 0,7366 | 0,4957 |
-| **Sin gama** (configuración actual) | **0,7239** | **0,4773** |
+| **Sin gama** (configuración elegida) | **0,7239** | **0,4773** |
 | Sin gama ni antigüedad | 0,7201 | 0,4713 |
 | Solo historia del chasis | 0,7036 | 0,4421 |
+
+*Comparación hecha antes de introducir el plan de mantenimiento por año; con él, la configuración elegida subió a AUC 0,7274 · PR-AUC 0,4808.*
 
 Poco más de un punto de AUC a cambio de robustez: una gama nunca vista deja de ser un problema. La antigüedad se conserva porque su costo adicional es marginal y describe una realidad mecánica, no una etiqueta comercial. La gama sigue viajando en el catálogo **solo como dato de pantalla**.
 
@@ -250,7 +261,7 @@ Pandera valida el CSV del ERP y cada etapa posterior. Tres comprobaciones no son
 
 **2. El volumen, no solo los tipos.** Un DataFrame de 40 filas cumple exactamente el mismo esquema que uno de 30.000. Es lo que produce la limpieza silenciosa: `errors="coerce"` convierte en nulo lo que no entiende, `dropna` bota la fila, y el pipeline sigue con lo que quede. `verificar_volumen()` corre tras cada etapa con mínimos declarados en `config.py`, holgados respecto de lo que produce la base actual (34.935 / 23.430 / 8.938 / 9.289 contra 20.000 / 12.000 / 3.000 / 4.000): la idea es detectar un derrumbe, no una variación normal.
 
-**3. El catálogo.** Cubre el fallo más difícil de ver: agregar una variable al entrenamiento y olvidar producirla en la ficha. El modelo entrenaría bien, las métricas saldrían bien, el CI verde — y `/predict/vin` reventaría en producción. `validar_catalogo()` lo convierte en un fallo de build, que es donde debe doler.
+**3. El catálogo.** Cubre el fallo más difícil de ver: agregar una variable al entrenamiento y olvidar producirla en la ficha. El modelo entrenaría bien, las métricas saldrían bien, el CI verde — y el endpoint de ingreso reventaría en producción. `validar_catalogo()` lo convierte en un fallo de build, que es donde debe doler.
 
 ### De 34.935 líneas a dos datasets
 
@@ -281,23 +292,23 @@ De ahí sale el embudo de la regresión:
 
 Los filtros de kilometraje no son cosmética: un solo valor absurdo distorsiona la media y la desviación del `StandardScaler`, y con eso toda la escala de la variable.
 
-El último paso define la naturaleza del dataset. **La historia del propio chasis es la variable central**: sin ella, un taxi que entra cada dos semanas y un particular que entra una vez al año le llegan idénticos al estimador, y lo mejor que puede hacer es predecir el promedio. Por eso se descartan los vehículos de un solo ingreso — no tienen ningún intervalo observado — aunque en producción sigan siendo consultables con la regla de fábrica.
+El último paso define la naturaleza del dataset. **La historia del propio chasis es la variable central**: sin ella, un taxi que entra cada dos semanas y un particular que entra una vez al año le llegan idénticos al estimador, y lo mejor que puede hacer es predecir el promedio. Por eso se descartan los vehículos de un solo ingreso — no tienen ningún intervalo observado. En producción se vuelven predecibles en cuanto ingresan por segunda vez: la API agrega esa visita y ya tienen su primer intervalo.
 
 Las importancias confirman el planteamiento: las cinco variables que más pesan son de historia o de uso, y ninguna domina sola.
 
 | Variable | Importancia |
 |---|---:|
-| Días desde la visita anterior | 0,093 |
-| Ausencia más larga conocida del vehículo | 0,092 |
-| Ritmo mediano previo del propio chasis | 0,088 |
-| Kilometraje | 0,071 |
-| Ciclos de 10.000 km acumulados | 0,070 |
+| Ausencia más larga conocida del vehículo | 0,093 |
+| Días desde la visita anterior | 0,092 |
+| Ritmo mediano previo del propio chasis | 0,087 |
+| Kilometraje | 0,069 |
+| Ciclos de 10.000 km acumulados | 0,069 |
 
-La **regla de 365 días / 10.000 km** entra también como variable (`Regla_Preventiva_Dias`, `Dias_Para_10k_Km`, `Ciclos_10k_Acumulados`): un vehículo de 160 km diarios alcanza los 10.000 km en 62 días, no en un año, y el modelo necesita saber cuál de los dos umbrales manda en cada caso. Y entra `Dias_En_Taller` (`F. Cierre − F. Entrada`), el único dato de la **experiencia** del cliente que registra el ERP — la mitad de las visitas se resuelven el mismo día y el 10 % pasa de 34. No hay fuga de información: el target se cuenta desde `F. Cierre`, así que la demora ya ocurrió cuando arranca el reloj.
+El **plan de mantenimiento de fábrica** entra también como variable (`Regla_Preventiva_Dias`), y depende del año del modelo: los vehículos **2022 en adelante** siguen el plan de **365 días o 10.000 km**; los **2021 y anteriores**, o de año desconocido, el de **6 meses (180 días) o 5.000 km**. En ambos manda lo que ocurra primero: un vehículo 2015 de 100 km diarios cumple los 5.000 km en 50 días, no en seis meses, y el modelo necesita saber cuál de los dos umbrales manda en cada caso. La regla vive en `config.py` y la aplica una sola función de `data.py`, la misma para entrenar y para servir. Junto a ella entran `Dias_Para_10k_Km` y `Ciclos_10k_Acumulados`, que miden la intensidad de uso con una vara común a todos los vehículos. Y entra `Dias_En_Taller` (`F. Cierre − F. Entrada`), el único dato de la **experiencia** del cliente que registra el ERP — la mitad de las visitas se resuelven el mismo día y el 10 % pasa de 34. No hay fuga de información: el target se cuenta desde `F. Cierre`, así que la demora ya ocurrió cuando arranca el reloj.
 
 ### Por qué dos modelos y no uno
 
-"En cuántos días vuelve" y "va a volver o no" parecen la misma pregunta. La segunda es mucho más contestable con estos datos (R² = +0,115 contra AUC = 0,724): predecir el día exacto es una meta mal planteada cuando el intervalo tiene un coeficiente de variación del 143 %. Y la clasificación se puede medir con AUC y con falsos positivos, que es lo que permite elegir el punto de operación con criterio de negocio. Un MAE de 100 días no le dice a nadie a quién llamar.
+"En cuántos días vuelve" y "va a volver o no" parecen la misma pregunta. La segunda es mucho más contestable con estos datos (R² = +0,115 contra AUC = 0,727): predecir el día exacto es una meta mal planteada cuando el intervalo tiene un coeficiente de variación del 143 %. Y la clasificación se puede medir con AUC y con falsos positivos, que es lo que permite elegir el punto de operación con criterio de negocio. Un MAE de 100 días no le dice a nadie a quién llamar.
 
 La clasificación además **entrena con más casos**. La regresión solo aprende de visitas con regreso observado, así que descarta la última visita de cada vehículo — exactamente los clientes que interesa detectar. La etiqueta binaria sí los alcanza:
 
@@ -320,7 +331,7 @@ Contar las censuradas como fuga sería inventar un abandono que no ha ocurrido: 
 
 Se comparan tres ensambles elegidos para que difieran de verdad — RandomForest (bagging con cortes óptimos), HistGradientBoosting (boosting secuencial) y ExtraTrees (bagging con cortes aleatorios, que difiere de RandomForest en exactamente una decisión de diseño). Los lineales quedan fuera por decisión del negocio; además el árbol no asume linealidad, captura interacciones sin que se las declaren y tolera los valores extremos que abundan en una base de taller. `random_state=42` fijo.
 
-**Los tres quedaron prácticamente empatados**: AUC 0,7239 / 0,7235 / 0,7164, con 0,0075 entre el primero y el tercero — menos que la variación entre particiones. La conclusión es que **el algoritmo no es el cuello de botella**; lo que limita el resultado son las variables disponibles.
+**Los tres quedaron prácticamente empatados**: AUC 0,7274 (RandomForest) / 0,7270 (ExtraTrees) / 0,7184 (HistGradientBoosting), con 0,009 entre el primero y el tercero — menos que la variación entre particiones. La conclusión es que **el algoritmo no es el cuello de botella**; lo que limita el resultado son las variables disponibles.
 
 Solo el 26,5 % de las visitas son fuga, así que sin balanceo un modelo que responda "nadie se va" acierta el 73,5 % y es inútil. `HistGradientBoosting` no acepta `class_weight` y recibe el balanceo como `sample_weight` en el `.fit()`: sin esa corrección su recall cae a 0,285 contra 0,570, y la comparación mediría el desbalance en lugar del algoritmo.
 
@@ -328,11 +339,11 @@ Solo el 26,5 % de las visitas son fuga, así que sin balanceo un modelo que resp
 
 | Umbral | Precisión | Recall | Alertas emitidas | Llamadas de más (FP) | Clientes perdidos sin alerta (FN) |
 |---:|---:|---:|---:|---:|---:|
-| 0,30 | 0,329 | **0,905** | 8.142 | 5.462 | **282** |
-| 0,40 | 0,377 | 0,766 | 6.022 | 3.754 | 694 |
-| **0,50** (actual) | 0,449 | 0,570 | 3.761 | 2.074 | 1.275 |
-| 0,60 | 0,512 | 0,360 | 2.083 | 1.016 | 1.895 |
-| 0,70 | 0,589 | 0,194 | 978 | 402 | 2.386 |
+| 0,30 | 0,331 | **0,905** | 8.101 | 5.421 | **282** |
+| 0,40 | 0,379 | 0,766 | 5.988 | 3.718 | 692 |
+| **0,50** (actual) | 0,449 | 0,573 | 3.783 | 2.086 | 1.265 |
+| 0,60 | 0,519 | 0,361 | 2.061 | 992 | 1.893 |
+| 0,70 | 0,594 | 0,191 | 955 | 388 | 2.395 |
 
 Bajar a 0,30 detecta el 90,5 % de las fugas. Si una llamada cuesta minutos de un asesor y un cliente perdido cuesta todos sus mantenimientos futuros, la aritmética favorece llamar de más. Se deja en `config.UMBRAL_DECISION_FUGA` para que lo decida el negocio.
 
@@ -340,12 +351,12 @@ Por último se contrasta un modelo global contra uno por **origen del vehículo*
 
 | RandomForest | AUC | Precisión | Recall | F1 | FP | FN |
 |---|---:|---:|---:|---:|---:|---:|
-| Global, sobre **vendidos por nosotros** | 0,7153 | 0,446 | 0,583 | 0,505 | 357 | 205 |
-| **Segmentado, sobre vendidos por nosotros** | 0,7132 | **0,462** | **0,596** | **0,520** | **341** | **199** |
-| Global, sobre **externos** | 0,7257 | 0,449 | 0,567 | 0,501 | 1.717 | 1.070 |
-| Segmentado, sobre externos | 0,7250 | 0,444 | 0,567 | 0,498 | 1.751 | 1.069 |
+| Global, sobre **vendidos por nosotros** | 0,7225 | 0,450 | 0,587 | 0,510 | 353 | 203 |
+| **Segmentado, sobre vendidos por nosotros** | 0,7199 | **0,457** | **0,593** | **0,516** | **347** | **200** |
+| Global, sobre **externos** | 0,7284 | 0,448 | 0,570 | 0,502 | 1.733 | 1.062 |
+| Segmentado, sobre externos | 0,7266 | 0,449 | 0,576 | 0,505 | 1.743 | 1.047 |
 
-En vehículos propios el segmentado comete **menos errores de los dos tipos**. El AUC es casi idéntico — ambos ordenan igual de bien — pero el segmentado está **mejor calibrado** para esa población: sus probabilidades caen donde el umbral las aprovecha mejor. En externos es un empate. Se congelan los tres modelos y la API devuelve las dos lecturas; cuando discrepan, el asesor ve una señal real.
+En vehículos propios el segmentado comete **menos errores de los dos tipos**. El AUC es casi idéntico — ambos ordenan igual de bien — pero el segmentado está **mejor calibrado** para esa población: sus probabilidades caen donde el umbral las aprovecha mejor. En externos es prácticamente un empate. La ganancia es pequeña (6 falsos positivos y 3 falsos negativos menos), así que **la API usa solo el modelo global**, con una sola probabilidad y una sola alerta, que es lo que el asesor necesita para decidir. Los modelos segmentados se siguen entrenando y congelando como evidencia, por si el negocio decide actuar distinto sobre cada origen.
 
 > **Cómo leer esa tabla.** Los AUC de segmentos distintos **no son comparables entre sí**, porque cada uno se mide contra la dificultad de su propia población. Lo comparable es global contra segmentado *dentro de la misma fila*, que es como está armada.
 
@@ -361,13 +372,27 @@ Dos disciplinas, y sin ellas todos los números de arriba serían ficticios.
 
 **Se congela el Pipeline completo, no solo el modelo.** Es la decisión de diseño más importante del proyecto. El `.joblib` guarda todo lo que se aprendió de los datos durante el `.fit()` — las medianas de los 15 campos numéricos, la media y desviación de cada uno para el `StandardScaler`, la moda de las categóricas, las 63 columnas tras el OneHot — y esos números **no están escritos en ninguna parte del código fuente**. Si la API recalculara su propia media y desviación usaría los datos que le llegan, no las 8.938 filas del entrenamiento: un `Kms.` de 45.000 se convertiría en un número distinto al que el modelo aprendió a interpretar, y las predicciones saldrían mal **sin arrojar ningún error**. Ese fallo silencioso se llama *training/serving skew*, y congelar el pipeline entero lo elimina por construcción.
 
-Por el mismo motivo, las fórmulas de servicio (`data.construir_fila_prediccion()`) viven en el mismo archivo que las del entrenamiento: que ambos calculen distinto una misma variable es el error más caro y más difícil de detectar de un proyecto de ML.
+Por el mismo motivo, **la API no tiene fórmulas propias para la historia del vehículo.** Cuando un carro ingresa, `data.ficha_con_ingreso_nuevo()` agrega esa visita a las que ya tenía en el historial y pasa todo por `construir_catalogo_vehiculos()`, la misma función que arma el catálogo del entrenamiento. Que ambos calculen distinto una misma variable es el error más caro y más difícil de detectar de un proyecto de ML; la prueba `test_historial_reproduce_el_catalogo` verifica en cada corrida que recalcular desde el historial da exactamente la ficha del entrenamiento.
 
-Tres decisiones menores completan la frontera:
+Cuatro decisiones más completan la frontera:
 
-- **La API pide el año del modelo, no la antigüedad**, porque es el dato que el asesor tiene a la vista en la tarjeta de propiedad. La traducción a antigüedad es interna y replica el cálculo del entrenamiento. El contrato se diseña alrededor de lo que el usuario **tiene**, no de lo que el modelo **necesita**.
-- **El catálogo se construye al entrenar**, no al arrancar la API: evita reprocesar 34.935 filas en cada reinicio y garantiza que la ficha servida sea la misma que vio el modelo.
-- **La regla preventiva viaja en la respuesta** junto a la predicción. Aplicarla tal cual da un MAE de 129,5 días, peor que predecir siempre la mediana (107,9): el plan describe cuándo el vehículo *debería* volver, no cuándo vuelve. La brecha entre ambas es información para el asesor.
+- **La API pide lo que el asesor tiene en la recepción**: el VIN, el kilometraje y para qué vino el carro (`tipo_cargo`, `tipo_trabajo`). Todo lo demás — año del modelo, visitas anteriores, ritmo, km por día — lo saca del historial. El contrato se diseña alrededor de lo que el usuario **tiene**, no de lo que el modelo **necesita**.
+- **Registrar un ingreso no exige reentrenar.** El modelo aprendió la relación *historia → regreso*, y esa relación no cambia de un día para otro; lo que cambia es la historia de cada carro. Por eso la API recalcula la historia con la visita de hoy y le vuelve a preguntar al mismo modelo. El ingreso no se guarda: quedará en la base cuando el ERP lo exporte y se corra `python -m src.actualizar_catalogo`.
+- **El historial se construye fuera de la API**, al entrenar o con `actualizar_catalogo`, no al arrancar: evita reprocesar 34.935 filas en cada reinicio y garantiza que la historia servida sea la misma que vio el modelo.
+- **El plan de mantenimiento actúa como tope.** Aplicado solo, el plan por año da un MAE de 111,8 días, peor que predecir siempre la mediana (107,9): describe cuándo el vehículo *debería* volver, no cuándo vuelve. Pero agendar a un cliente **después** de que ya le tocaba el mantenimiento no tiene sentido, así que la fecha final es lo que ocurra primero entre el modelo y el plan. El campo `base_de_la_fecha` le dice al asesor cuál de los dos mandó.
+
+### El plan de llamada
+
+La regresión se equivoca en promedio 98 días (MAE del holdout por VIN). Entregar "vuelve el 17 de abril" transmitiría una precisión que el modelo no tiene, así que la API entrega una **ventana**:
+
+```
+fecha estimada = fecha de entrega + días estimados (tope: plan de mantenimiento)
+ventana        = [fecha estimada − MAE, fecha estimada + MAE]   (nunca antes de la entrega)
+```
+
+El MAE se lee de `metricas_entrenamiento.json` al arrancar, así que la ventana se ajusta sola cada vez que se reentrena. Contra el día de la consulta, el vehículo queda en uno de tres estados: `programar` (la ventana no ha abierto), `llamar_ahora` (está dentro) o `llamar_ya` (ya cerró sin que volviera).
+
+**La alerta de fuga adelanta la llamada.** La ventana responde *"si vuelve, ¿cuándo?"*; la alerta responde *"¿va a volver?"*. Son preguntas distintas y pueden no coincidir: la regresión solo aprendió de carros que sí volvieron. Si el clasificador dice que lo más probable es que el cliente no vuelva, esperar a que abra la ventana es esperar a perderlo, así que un vehículo en `programar` con alerta pasa a `llamar_ahora`. Si el carro todavía está en el concesionario, el mensaje pide dejarle agendada la próxima cita al entregarlo: es el momento en que el cliente está presente.
 
 **El CI corre `ruff` → `train` → `pytest`**, en ese orden: ruff falla en segundos y es lo más barato; el entrenamiento va antes que las pruebas porque estas cargan los `.joblib` y en una máquina limpia hay que generarlos. Reentrenar en cada push es lo que demuestra que el pipeline es reproducible de verdad.
 
@@ -377,174 +402,116 @@ Tres decisiones menores completan la frontera:
 
 | Método | Ruta | Función |
 |---|---|---|
+| `POST` | `/predict/vin/{vin}/ingreso` | Registra el ingreso del vehículo y devuelve regreso estimado, riesgo de fuga y plan de llamada |
 | `GET` | `/` | Health check: confirma que el servicio vive y que los artefactos cargaron |
-| `POST` | `/predict` | Predicción con datos manuales |
-| `GET` | `/predict/vin/{vin}` | Predicción por chasis, completando los datos desde el catálogo |
-| `GET` | `/fuga/vin/{vin}` | Riesgo de que ese cliente deje de volver |
 | `GET` | `/docs` | Swagger UI autogenerado, con el contrato siempre al día |
 
-Los JSON de abajo son la respuesta **completa** de cada endpoint. El [README](README.md#cómo-se-usa) muestra los mismos ejemplos recortados a lo esencial.
+Hay un solo endpoint de predicción a propósito: toda predicción parte de una visita registrada, así que la historia del vehículo siempre está al día con lo que el asesor tiene enfrente, aunque la base de datos todavía no lo sepa.
 
 ### `GET /` — Health check
 
 ```json
 {
-  "mensaje": "API de Retención Predictiva de Automotor.co S.A.S. activa 🚗",
+  "mensaje": "API de Retención Predictiva del concesionario activa 🚗",
   "modelo_cargado": true,
   "modelo_fuga_cargado": true,
   "algoritmo_fuga": "RandomForest",
-  "modelos_fuga_por_origen": ["externos", "vendidos"],
-  "catalogo_cargado": true,
-  "vehiculos_en_catalogo": 9289,
-  "vehiculos_predecibles": 4496,
-  "regla_preventiva": "365 días o 10000 km",
-  "umbral_fuga_dias": 365
+  "historial_cargado": true,
+  "vehiculos_en_historial": 9289,
+  "margen_error_dias": 98.4,
+  "fecha_corte_datos": "2026-06-30"
 }
 ```
 
-`vehiculos_predecibles` es el subconjunto con al menos dos ingresos; el resto se puede consultar pero solo recibe la regla de fábrica. Y si los `.joblib` no existen el servidor **no se cae**: arranca con `modelo_cargado: false`, para que el health check siga respondiendo y el problema se pueda diagnosticar en vez de quedarse a oscuras.
+Si los `.joblib` no existen el servidor **no se cae**: arranca con `modelo_cargado: false` o `historial_cargado: false`, para que el health check siga respondiendo y el problema se pueda diagnosticar en vez de quedarse a oscuras.
 
-### `POST /predict`
+### `POST /predict/vin/{vin}/ingreso`
 
-**Entrada**, validada por Pydantic con la clase `SolicitudVehiculo`:
+El VIN viaja en la URL y se normaliza (mayúsculas, sin espacios) antes de buscar. **Entrada**, validada por Pydantic con la clase `IngresoHoy`:
 
 ```json
 {
-  "Tipo Cargo": "Cliente",
-  "Tipo de Trabajo": "MECANICA",
-  "Kms.": 45000.0,
-  "Año Modelo": 2022,
-  "Es_Vehiculo_Vendido": true,
-  "Visitas_Previas": 3,
-  "Dias_Desde_Visita_Anterior": 180.0,
-  "Kms_Visita_Anterior": 32000.0
+  "kilometraje": 20400,
+  "tipo_cargo": "Cliente",
+  "tipo_trabajo": "MECANICA",
+  "fecha_ingreso": "2026-10-19",
+  "fecha_entrega": "2026-10-19"
 }
 ```
 
 | Campo | Tipo | Obligatorio | Restricción |
 |---|---|---|---|
-| `Tipo Cargo` | string | Sí | — |
-| `Tipo de Trabajo` | string | No (`"MECANICA"` por defecto) | — |
-| `Kms.` | float | Sí | — |
-| `Año Modelo` | int | Sí | entre 1990 y el año entrante |
-| `Es_Vehiculo_Vendido` | bool | Sí | — |
-| `Visitas_Previas` | int | **Sí** | ≥ 1 |
-| `Dias_Desde_Visita_Anterior` | float | **Sí** | ≥ 0 |
-| `Kms_Visita_Anterior` | float | No | ≥ 0 |
-| `Ritmo_Mediano_Previo` | float | No | ≥ 0 — si falta, se usa el último intervalo |
+| `kilometraje` | float | **Sí** | ≥ 0 y < 500.000; no menor que el de la visita anterior |
+| `tipo_cargo` | string | No (`"Cliente"`) | `Cliente`, `Garantia`, `Seguros` o `Interno` |
+| `tipo_trabajo` | string | No (`"MECANICA"`) | `MECANICA`, `COLISION`, `MECANICA Y COLISION` u `OTRO` |
+| `fecha_ingreso` | fecha | No (hoy) | No futura; posterior al último ingreso registrado del VIN |
+| `fecha_entrega` | fecha | No (= ingreso) | No anterior al ingreso |
 
-Los cuatro últimos son la **historia del vehículo**, y los dos primeros de ellos son obligatorios a propósito: aceptar la petición sin ellos devolvería la mediana de la población disfrazada de predicción individual. El contrato pide exactamente lo que el modelo consume y solo eso; un campo de más se ignora, y `test_modelo_solo_consume_columnas_declaradas` lo deja fijado. Las variables derivadas (km por día, días para los 10.000 km, regla preventiva) las calcula `data.construir_fila_prediccion()`, que vive en el mismo archivo que las fórmulas del entrenamiento.
+`tipo_cargo` y `tipo_trabajo` son las dos variables categóricas con las que se entrenó el modelo, y sus valores son exactamente los que existen en la base. Un mantenimiento normal es `Cliente` + `MECANICA`; un siniestro, `Seguros` + `COLISION`.
 
 **Salida:**
 
 ```json
 {
-  "prediccion_dias_retorno": 196.6,
-  "unidad": "días",
-  "regla_preventiva_dias": 138.5,
-  "vehiculo_atrasado_frente_a_regla": true,
-  "riesgo_de_fuga": {
-    "algoritmo": "RandomForest",
-    "probabilidad_fuga": 0.5762,
-    "alerta": true,
-    "segmento": "vendidos",
-    "probabilidad_fuga_modelo_del_segmento": 0.5524
-  }
-}
-```
-
-### `GET /predict/vin/{vin}`
-
-Sin cuerpo. El VIN viaja en la URL y se normaliza (mayúsculas, sin espacios) antes de buscar.
-
-```json
-{
-  "vin": "ADM130850",
+  "vin": "DEU822806",
   "datos_encontrados": {
-    "gama": "I10",
-    "anio_modelo": 2013,
-    "antiguedad_calculada": 7.0,
-    "ultimo_kilometraje": 487636.0,
-    "ultima_visita": "2020-02-18",
-    "ultima_entrega": "2020-02-18",
+    "gama": "Tucson",
+    "anio_modelo": 2014,
+    "antiguedad_calculada": 12.0,
+    "ultimo_kilometraje_visita_concesionario": 20400.0,
+    "ultima_visita_concesionario": "2026-10-19",
     "vendido_por_nosotros": false,
-    "total_visitas": 55,
-    "ritmo_habitual_dias": 14.5,
-    "km_por_dia": 160.7
+    "total_visitas": 3,
+    "ritmo_habitual_dias": 576.0,
+    "km_por_dia": 6.6
   },
-  "prediccion_dias_retorno": 28.2,
-  "unidad": "días",
-  "origen_estimacion": "modelo",
-  "regla_preventiva_dias": 62.2,
-  "riesgo_de_fuga": { "probabilidad_fuga": 0.5127, "alerta": true, "segmento": "externos" }
-}
-```
-
-Si el chasis tiene **un solo ingreso** la respuesta cambia de naturaleza y lo declara, en vez de devolver un número con la misma cara que una predicción real:
-
-```json
-{
-  "prediccion_dias_retorno": 365.0,
-  "origen_estimacion": "regla_preventiva",
-  "regla_preventiva_dias": 365.0,
-  "advertencia": "El VIN '0F6S00876' tiene un solo ingreso registrado: no hay intervalo observado del que estimar su ritmo. Se devuelve la regla preventiva (365 días o 10000 km), no una predicción del modelo."
-}
-```
-
-El historial está incompleto para algunos chasis (hay VIN sin año de modelo o sin kilometraje). En esos casos el campo viaja como `null` y el imputador del pipeline rellena con la mediana, igual que en el entrenamiento. No se inventa un `0`, porque eso le diría al modelo que es un carro nuevo.
-
-### `GET /fuga/vin/{vin}`
-
-Está separado de `/predict/vin` porque se usa distinto: aquel agenda a un cliente concreto, este alimenta la **lista de a quiénes hay que llamar**.
-
-```json
-{
-  "vin": "ADM130850",
+  "prediccion_dias_retorno": 180.0,
   "riesgo_de_fuga": {
-    "algoritmo": "RandomForest",
-    "umbral_dias": 365,
-    "umbral_decision": 0.5,
-    "segmento": "externos",
-    "probabilidad_fuga": 0.5127,
-    "alerta": true,
-    "probabilidad_fuga_modelo_del_segmento": 0.525,
-    "alerta_modelo_del_segmento": true
+    "probabilidad_fuga": 0.7758,
+    "alerta": true
   },
-  "historia_que_lo_sustenta": {
-    "total_visitas": 55,
-    "ritmo_habitual_dias": 14.5,
-    "dias_desde_visita_anterior": 24.0,
-    "km_por_dia": 160.7,
-    "ultima_visita": "2020-02-18",
-    "vendido_por_nosotros": false
+  "plan_de_llamada": {
+    "estado": "llamar_ahora",
+    "mensaje": "Riesgo alto de fuga (78%): no esperar a la ventana. Dejarle agendada la próxima cita al entregarle el carro (su ventana normal sería del 2027-01-09 al 2027-07-24).",
+    "fecha_referencia": "2026-10-19",
+    "fecha_estimada_retorno": "2027-04-17",
+    "margen_error_dias": 98.4,
+    "fecha_corte_datos": "2026-06-30",
+    "base_de_la_fecha": "Plan de mantenimiento: cumple 180 días (plan 6 meses o 5.000 km, modelos 2021 o anteriores), antes que los 319 días que estima el modelo por su historia."
   }
 }
 ```
 
-Un chasis **sin historia** responde **`409 Conflict`**, no `200` con un número inventado: sin un segundo ingreso no hay ritmo contra el cual comparar la ausencia, y el riesgo simplemente no es calculable.
+Cómo se lee este ejemplo: el Tucson había venido en agosto de 2023 y en junio de 2026. Con el ingreso de hoy suma 3 visitas; su ritmo habitual queda en 576 días (la mediana de los intervalos de 1.041 y 111 días) y sus km por día en 6,6. El modelo estima 319 días, pero es un 2014 y su plan es de 6 meses: la fecha estimada queda a los 180 días. Con 78 % de probabilidad de fuga, la instrucción es no esperar a la ventana.
+
+El historial está incompleto para algunos chasis (hay VIN sin año de modelo). En esos casos el campo viaja como `null`, el imputador del pipeline rellena con la mediana igual que en el entrenamiento, y se aplica el plan de mantenimiento corto. No se inventa un `0`, porque eso le diría al modelo que es un carro nuevo.
 
 ### Qué significa cada campo de la respuesta
 
 | Campo | Qué es |
 |---|---|
-| `prediccion_dias_retorno` | Días estimados hasta el próximo ingreso |
-| `origen_estimacion` | `modelo` o `regla_preventiva`. Permite a un CRM distinguir programáticamente una predicción de un valor por defecto, sin interpretar texto |
-| `regla_preventiva_dias` | Lo que dice el plan de fábrica para ese vehículo. Viaja siempre al lado de la predicción, como referencia contra la cual juzgar el número en vez de pedirle fe ciega al modelo |
-| `vehiculo_atrasado_frente_a_regla` | Si ya se pasó el plazo de la regla |
-| `riesgo_de_fuga.probabilidad_fuga` · `alerta` | Probabilidad del modelo global y si supera `UMBRAL_DECISION_FUGA` |
-| `riesgo_de_fuga.probabilidad_fuga_modelo_del_segmento` | La misma lectura según el modelo entrenado solo con vehículos del mismo origen. Cuando las dos discrepan, el asesor está viendo una señal real |
-| `datos_encontrados` | Solo en `/predict/vin`: ficha del vehículo, para que el asesor verifique que se buscó el carro correcto antes de confiar en la cifra |
-| `historia_que_lo_sustenta` | Solo en `/fuga/vin`: visitas, ritmo habitual, días de ausencia. Un asesor no puede llamar con una probabilidad sin contexto — necesita poder decir *"lleva 24 días sin venir y normalmente viene cada 14"* |
-| `advertencia` | Aparece cuando el chasis tiene un solo ingreso y se devolvió la regla de fábrica |
+| `datos_encontrados` | Ficha del vehículo **ya con la visita de hoy**, para que el asesor verifique que se buscó el carro correcto antes de confiar en la cifra |
+| `ultimo_kilometraje_visita_concesionario` · `ultima_visita_concesionario` | Odómetro y fecha de la visita que se acaba de registrar |
+| `ritmo_habitual_dias` | Mediana de los días entre visitas del propio chasis |
+| `km_por_dia` | Mediana de los km por día entre visitas |
+| `prediccion_dias_retorno` | Días hasta el próximo ingreso, contados desde la entrega: lo que ocurra primero entre el modelo y el plan de mantenimiento |
+| `riesgo_de_fuga.probabilidad_fuga` · `alerta` | Probabilidad de que no vuelva en 365 días según el modelo global, y si supera `UMBRAL_DECISION_FUGA` (0,50) |
+| `plan_de_llamada.estado` | `programar`, `llamar_ahora` o `llamar_ya` |
+| `plan_de_llamada.mensaje` | La instrucción para el asesor, con las fechas de la ventana |
+| `plan_de_llamada.fecha_referencia` | Día de la consulta contra el cual se decide el estado |
+| `plan_de_llamada.fecha_estimada_retorno` | Fecha de entrega + días estimados |
+| `plan_de_llamada.margen_error_dias` | MAE del modelo: el ancho de la ventana hacia cada lado |
+| `plan_de_llamada.fecha_corte_datos` | Último ingreso que trae la base. Lo posterior solo lo conoce la API si se registra en la petición |
+| `plan_de_llamada.base_de_la_fecha` | Si mandó el modelo o el plan de mantenimiento, y por qué |
 
 ### Códigos de error
 
 | Código | Cuándo ocurre |
 |---|---|
-| `422` | El JSON no cumple el contrato: falta un campo, llega texto donde va número, o el año está fuera de rango |
-| `404` | El VIN no tiene historial en el taller |
-| `409` | El VIN existe pero tiene un solo ingreso: su riesgo de fuga no es calculable |
-| `500` | Falta algún `.joblib` del modelo o del catálogo |
+| `422` | El cuerpo no cumple el contrato (falta el kilometraje, llega texto donde va número, un tipo de trabajo que no existe), el odómetro es menor que el de la visita anterior, o las fechas son incoherentes |
+| `404` | El VIN no tiene historial en el concesionario: sería su primer ingreso y no hay ritmo del que estimar su regreso |
+| `409` | La fecha de ingreso es igual o anterior al último ingreso registrado del VIN |
+| `500` | Falta algún `.joblib` del modelo o del historial |
 | `400` | Error inesperado durante la inferencia |
 
 ---
@@ -555,26 +522,26 @@ Un chasis **sin historia** responde **`409 Conflict`**, no `200` con un número 
 
 | | Métrica | Resultado | Lectura |
 |---|---|---:|---|
-| **Regresión** | MAE | 100,4 días | Desfase promedio entre lo predicho y lo real |
+| **Regresión** | MAE | 100,5 días | Desfase promedio entre lo predicho y lo real (98,4 en el holdout por VIN) |
 | | RMSE | 167,5 días | Muy por encima del MAE → hay casos con errores extremos |
 | | R² | **+0,115** | Supera al promedio, pero por poco |
-| **Clasificación** | AUC | **0,724** | Ordena bien a los clientes por riesgo de fuga |
-| | PR-AUC | 0,477 | Contra una tasa base de 0,265 |
-| | Recall @0,50 | 0,570 | Detecta algo más de la mitad de las fugas |
+| **Clasificación** | AUC | **0,727** | Ordena bien a los clientes por riesgo de fuga |
+| | PR-AUC | 0,481 | Contra una tasa base de 0,265 |
+| | Recall @0,50 | 0,573 | Detecta algo más de la mitad de las fugas |
 | | Recall @0,30 | **0,905** | Bajando el umbral detecta 9 de cada 10 |
 
-**La conclusión principal es que la clasificación funciona y la regresión apenas.** Un AUC de 0,724 es utilizable para priorizar llamadas; un R² de 0,115 no sirve para decidir sobre un cliente concreto.
+**La conclusión principal es que la clasificación funciona y la regresión apenas.** Un AUC de 0,727 es utilizable para priorizar llamadas; un R² de 0,115 no sirve para decidir sobre un cliente concreto. Por eso la API convierte la regresión en una ventana del ancho de su error y deja que la alerta de fuga mande sobre ella.
 
 Contra las referencias sin aprendizaje, la regresión gana en las tres métricas — pero el margen es estrecho:
 
 | Referencia | MAE | RMSE | R² |
 |---|---:|---:|---:|
-| Regla preventiva 365 d / 10.000 km | 129,52 | 196,43 | −0,216 |
+| Plan de mantenimiento por año (2022+: 365 d / 10.000 km · ≤2021: 180 d / 5.000 km) | 111,77 | 189,51 | −0,132 |
 | Ritmo mediano del propio vehículo | 105,02 | 196,32 | −0,214 |
 | Predecir siempre la mediana | 107,88 | 186,21 | −0,093 |
-| **Random Forest** | **100,40** | **167,51** | **+0,115** |
+| **Random Forest** | **100,53** | **167,54** | **+0,115** |
 
-Y una observación que vale para el negocio: **aplicar la regla de fábrica tal cual es la peor de las referencias** (MAE de 129,5 días). El plan describe cuándo el vehículo *debería* volver, no cuándo vuelve.
+Y una observación que vale para el negocio: **aplicar el plan de fábrica tal cual sigue siendo la peor de las referencias**, aunque diferenciarlo por año la acercó bastante a la realidad (MAE de 111,8 días contra 129,5 con el plan único de 365 días o 10.000 km). El plan describe cuándo el vehículo *debería* volver, no cuándo vuelve; por eso en la API funciona como tope y no como predicción.
 
 ### El techo que queda
 
@@ -582,7 +549,7 @@ El límite no es el algoritmo — los tres clasificadores quedaron dentro de 0,0
 
 1. **Lo que hace volver a un cliente no está en los datos.** Si quedó conforme, qué pagó, si le cumplieron la fecha de entrega. El ERP registra la transacción, no la experiencia. La demora en taller es lo único que se pudo rescatar de esa dimensión.
 2. **El objetivo es muy disperso.** Coeficiente de variación del 143 %: media de 144 días contra mediana de 77, con un máximo de 2.936. Hay al menos dos poblaciones mezcladas — quien vuelve al mantenimiento de rutina y quien desaparece por años.
-3. **Falta `edad_mora`**, el atraso contra el plan de mantenimiento por gama. Es reconstruible si la empresa entrega ese plan, y sería la variable más directa del problema.
+3. **El plan de mantenimiento es todavía grueso.** Hoy se distingue por año del modelo (2022 en adelante contra 2021 y anteriores). Un plan por gama y versión permitiría calcular `edad_mora`, el atraso exacto contra lo que le toca a cada vehículo, que sería la variable más directa del problema.
 4. **No se observa lo que pasa fuera de este concesionario.** Un vehículo que se mantiene al día en otro taller de la red Hyundai es, para esta base, indistinguible de uno abandonado.
 5. **Los 2.218 vehículos entregados que nunca volvieron quedan fuera del alcance.** No tienen un segundo ingreso del cual estimar ritmo, así que ningún modelo basado en historia de taller puede alcanzarlos. Necesitan un enfoque distinto, alimentado con datos de la venta.
 
@@ -615,5 +582,6 @@ Una segunda capa útil sería **reportar** lo descartado en vez de solo descarta
 - **Búsqueda de hiperparámetros** con `GridSearchCV` anidado dentro de la validación por grupos. Los tres modelos usan valores fijos elegidos a mano; dado lo parejos que quedaron, es poco probable que la ganancia sea grande, pero no está medido.
 - **XGBoost / LightGBM.** Agregarlos implica sumar dependencias al CI para un contraste que, visto el empate entre los tres algoritmos actuales, probablemente tampoco mueva la aguja.
 - **Discretizar el objetivo de la regresión** en rangos (0-3 meses, 3-6, 6+). Con un RMSE de 167 días, predecir el valor exacto es una meta mal planteada; predecir el rango es útil y alcanzable.
-- **Intervalo de predicción en vez de un número.** Entregar "vuelve en 196 días" transmite una precisión que el modelo no tiene. Un rango con su nivel de confianza sería más honesto y más accionable.
+- **Una ventana a la medida de cada vehículo.** Hoy la ventana de llamada usa el mismo margen (el MAE global, 98 días) para todos. Un intervalo por cuantiles — o la dispersión entre los árboles del bosque — daría ventanas angostas para los clientes predecibles y anchas para los erráticos.
+- **Una fuga a la medida del plan.** La etiqueta de fuga usa 365 días para todos los vehículos. Para los 2021 y anteriores, cuyo plan es de 6 meses, un umbral más corto podría detectar el abandono antes; requiere reentrenar y comparar.
 - **Separar por tipo de trabajo**: el retorno tras una `COLISION` y tras un mantenimiento de `MECANICA` son fenómenos distintos. Se puede contrastar con la misma maquinaria de `comparar_clasificadores()` cambiando la columna de corte.

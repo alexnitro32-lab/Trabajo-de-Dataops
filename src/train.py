@@ -58,14 +58,15 @@ def calcular_referencias(df: pd.DataFrame) -> dict:
 
     Sin ellas un R2 de 0,12 no dice nada. Estas dicen contra que se compara:
       - La MEDIANA: predecir siempre lo mismo. Es el piso absoluto.
-      - La REGLA PREVENTIVA de fabrica (365 dias o 10.000 km). Es lo que el
-        taller ya puede calcular sin ningun modelo, y por tanto la barra real.
+      - La REGLA PREVENTIVA de fabrica segun el año del modelo (365 dias o
+        10.000 km desde 2022; 6 meses o 5.000 km antes). Es lo que el
+        concesionario ya puede calcular sin ningun modelo, y por tanto la barra real.
       - El RITMO del propio vehiculo, sin modelo que lo corrija.
     """
     y = df[config.TARGET].astype(float)
     return {
         "mediana_constante": evaluate.evaluar_modelo(y, np.full(len(y), y.median())),
-        "regla_preventiva_365d_10000km": evaluate.evaluar_modelo(
+        "regla_preventiva_plan_por_anio": evaluate.evaluar_modelo(
             y, df["Regla_Preventiva_Dias"].fillna(float(config.REGLA_MANTENIMIENTO_DIAS))
         ),
         "ritmo_mediano_del_propio_vin": evaluate.evaluar_modelo(
@@ -267,6 +268,9 @@ def ejecutar_entrenamiento(): #Ejecuta el ciclo de vida completo de entrenamient
     # produccion con el CI en verde.
     catalogo = esquema.validar_catalogo(data.construir_catalogo_vehiculos(df_visitas))
     joblib.dump(catalogo, config.RUTA_CATALOGO_VEHICULOS, compress=3)
+    # Historial completo: la API lo usa para recalcular la historia de un carro
+    # que entra hoy, sin esperar a que el ingreso llegue a la base.
+    joblib.dump(data.historial_para_servicio(df_visitas), config.RUTA_HISTORIAL_VISITAS, compress=3)
     print(f"   Catalogo de {len(catalogo)} vehiculos ({int(catalogo['Apto_Para_Modelo'].sum())} con historia suficiente)")
 
     # El JSON es la evidencia citable: la tesis no deberia depender de que

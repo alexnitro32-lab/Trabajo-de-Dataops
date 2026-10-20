@@ -4,8 +4,9 @@ from pathlib import Path  # Libreria estandar para manejar rutas de forma segura
 
 RUTA_RAIZ = Path(__file__).resolve().parent.parent # es la carpeta raiz del proyecto
 RUTA_DATA_RAW = RUTA_RAIZ / "data" / "Base de datos Limpia..csv" #esto lo que hace es concatenar la ruta raiz con la carpeta data y el nombre del archivo csv. el operador / de Path hace que funcione en cualquier sistema operativo.
-RUTA_MODELO_SERIALIZADO = RUTA_RAIZ / "models" / "modelo_retencion.joblib" #esto es la ruta donde se guarda el modelo entrenado, para que main.py lo pueda cargar y usar en el endpoint /predict.
+RUTA_MODELO_SERIALIZADO = RUTA_RAIZ / "models" / "modelo_retencion.joblib" #esto es la ruta donde se guarda el modelo entrenado, para que main.py lo pueda cargar y usar en el endpoint de ingreso.
 RUTA_CATALOGO_VEHICULOS = RUTA_RAIZ / "models" / "catalogo_vehiculos.joblib" #esto es la ruta donde se guarda el catalogo de vehiculos (marca, gama, antiguedad) que se construye en data.py y se usa en features.py para crear variables de ingenieria.
+RUTA_HISTORIAL_VISITAS = RUTA_RAIZ / "models" / "historial_visitas.joblib" #todas las visitas consolidadas por VIN: permite que la API recalcule la historia cuando el carro entra HOY, sin esperar a reentrenar.
 RUTA_MODELO_FUGA = RUTA_RAIZ / "models" / "modelo_fuga.joblib" #clasificador de fuga: responde "este cliente va a dejar de volver?", que es la pregunta que mueve la accion comercial.
 RUTA_MODELOS_FUGA_SEGMENTADOS = RUTA_RAIZ / "models" / "modelos_fuga_segmentados.joblib" #un clasificador por origen (vendidos / externos), pedidos por el negocio para poder actuar distinto sobre cada poblacion.
 RUTA_METRICAS = RUTA_RAIZ / "models" / "metricas_entrenamiento.json" #evidencia reproducible de la comparacion global vs segmentado; la tesis cita este archivo, no la consola.
@@ -97,6 +98,17 @@ PRIORIDAD_TIPO_CARGO = {"Cliente": 0, "Garantia": 1, "Seguros": 2, "Interno": 3}
 REGLA_MANTENIMIENTO_DIAS = 365
 REGLA_MANTENIMIENTO_KMS = 10_000
 
+# PLAN DE MANTENIMIENTO SEGUN EL AÑO DEL MODELO. Lo usan el entrenamiento (variable
+# Regla_Preventiva_Dias) y la API (tope de la fecha estimada). Los vehiculos 2022 en adelante siguen el plan de 365 dias o
+# 10.000 km; los 2021 y anteriores, el de 6 meses o 5.000 km. La fecha estimada
+# de retorno es la que ocurra primero entre la prediccion del modelo y este plan:
+# no tiene sentido agendar al cliente despues de que ya le toco el mantenimiento.
+# Si el año del modelo no se conoce se usa el plan corto: llamar antes cuesta
+# menos que perder al cliente.
+ANIO_DESDE_PLAN_NUEVO = 2022
+PLAN_MANTENIMIENTO_NUEVO = {"dias": 365, "kms": 10_000, "nombre": "365 días o 10.000 km, modelos 2022 en adelante"}
+PLAN_MANTENIMIENTO_ANTERIOR = {"dias": 180, "kms": 5_000, "nombre": "6 meses o 5.000 km, modelos 2021 o anteriores"}
+
 # -------------------------------------------------------------------------
 # UNIDAD DE ANALISIS: EL VEHICULO, NO LA VISITA SUELTA
 # -------------------------------------------------------------------------
@@ -151,7 +163,7 @@ COLUMNAS_NUMERICAS_HISTORIA = [
     "Km_Por_Dia",              # Intensidad de uso en el ultimo tramo
     "Km_Por_Dia_Medio",        # Intensidad de uso tipica del vehiculo
     "Dias_Para_10k_Km",        # A su ritmo de uso, cuantos dias tarda en hacer 10.000 km
-    "Regla_Preventiva_Dias",   # min(365 dias, dias para 10.000 km) = la regla de negocio
+    "Regla_Preventiva_Dias",   # plazo o km del plan de su año de modelo, lo que ocurra primero
     "Km_Sobre_Umbral_10k",     # Cuantos ciclos de 10.000 km cubrio desde la visita anterior
     "Ciclos_10k_Acumulados",   # Odometro expresado en ciclos de mantenimiento
 ]

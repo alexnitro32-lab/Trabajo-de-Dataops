@@ -232,20 +232,27 @@ def agregar_features_historia(df_visitas: pd.DataFrame) -> pd.DataFrame:
     ).dt.days.clip(lower=0, upper=120)
     df["Mes_Entrada"] = df[config.COLUMNA_FECHA_ENTRADA].dt.month
 
-    # --- REGLA DE NEGOCIO: 365 DIAS O 10.000 KM, LO QUE OCURRA PRIMERO ---
+    # --- REGLA DE NEGOCIO: PLAZO O KILOMETRAJE, LO QUE OCURRA PRIMERO ---
     # A su ritmo de uso, cuantos dias tarda este vehiculo en hacer 10.000 km.
+    # Es una medida de intensidad de uso, comun a todos los vehiculos.
     # El tope de 3.000 dias evita que un carro casi parado (0,5 km/dia) genere
     # un numero astronomico que descuadre la escala de la variable.
     df["Dias_Para_10k_Km"] = (
         config.REGLA_MANTENIMIENTO_KMS / df["Km_Por_Dia_Medio"].replace(0, np.nan)
     ).clip(upper=3000)
 
-    # La regla en si: el que se cumpla primero. Es la referencia teorica contra
-    # la cual se mide si el modelo aporta algo por encima del plan de fabrica.
-    df["Regla_Preventiva_Dias"] = np.fmin(
-        float(config.REGLA_MANTENIMIENTO_DIAS),
-        df["Dias_Para_10k_Km"].fillna(float(config.REGLA_MANTENIMIENTO_DIAS)),
-    )
+    # La regla en si, SEGUN EL AÑO DEL MODELO: los 2022 en adelante siguen el
+    # plan de 365 dias o 10.000 km; los 2021 y anteriores (o de año desconocido),
+    # el de 6 meses o 5.000 km. En ambos casos manda el que se cumpla primero.
+    # Es la referencia contra la cual se mide si el modelo aporta algo por
+    # encima del plan de fabrica, y la misma que la API usa como tope.
+    es_plan_nuevo = df[col_ano] >= config.ANIO_DESDE_PLAN_NUEVO  # NaN -> False -> plan corto
+    plan_dias = np.where(es_plan_nuevo, config.PLAN_MANTENIMIENTO_NUEVO["dias"],
+                         config.PLAN_MANTENIMIENTO_ANTERIOR["dias"]).astype(float)
+    plan_kms = np.where(es_plan_nuevo, config.PLAN_MANTENIMIENTO_NUEVO["kms"],
+                        config.PLAN_MANTENIMIENTO_ANTERIOR["kms"]).astype(float)
+    dias_por_km = (plan_kms / df["Km_Por_Dia_Medio"].replace(0, np.nan)).clip(upper=3000)
+    df["Regla_Preventiva_Dias"] = np.fmin(plan_dias, dias_por_km.fillna(pd.Series(plan_dias, index=df.index)))
 
     # El recorrido expresado en ciclos de mantenimiento en vez de en kilometros
     # sueltos: "hizo 1,4 mantenimientos de distancia" dice mas que "14.000 km".
@@ -253,6 +260,18 @@ def agregar_features_historia(df_visitas: pd.DataFrame) -> pd.DataFrame:
     df["Ciclos_10k_Acumulados"] = df[config.COLUMNA_KMS] / config.REGLA_MANTENIMIENTO_KMS
 
     return df
+
+
+def plan_mantenimiento(anio_modelo: float | None) -> dict:
+    """Plan de fabrica que le corresponde a UN vehiculo segun su año de modelo.
+
+    Misma regla que agregar_features_historia() aplica a toda la base: 2022 en
+    adelante -> 365 dias o 10.000 km; 2021, anteriores o desconocido -> 6 meses
+    o 5.000 km.
+    """
+    if anio_modelo is not None and not pd.isna(anio_modelo) and anio_modelo >= config.ANIO_DESDE_PLAN_NUEVO:
+        return config.PLAN_MANTENIMIENTO_NUEVO
+    return config.PLAN_MANTENIMIENTO_ANTERIOR
 
 
 def preparar_dataset_entrenamiento(df_con_historia: pd.DataFrame) -> pd.DataFrame:
@@ -361,96 +380,6 @@ def preparar_dataset_fuga(df_con_historia: pd.DataFrame, umbral_dias: int = None
     return df[columnas].copy()
 
 
-def construir_fila_prediccion(
-    tipo_cargo: str,
-    tipo_trabajo: str,
-    kms_actual: float | None,
-    anio_modelo: float | None,
-    es_vehiculo_vendido: int,
-    visitas_previas: int,
-    dias_desde_visita_ant: float | None,
-    kms_visita_ant: float | None,
-    ritmo_mediano_previo: float | None = None,
-    dias_en_taller: float | None = None,
-    mes_entrada: int | None = None,
-    anio_actual: int | None = None,
-) -> pd.DataFrame:
-    """Arma UNA fila con el mismo vector de caracteristicas del entrenamiento.
-
-    Existe para que la API no tenga que reimplementar las formulas: si maniana
-    cambia como se calcula el ritmo o la regla preventiva, se corrige en
-    agregar_features_historia() y aqui, en el mismo archivo y a la vista. Que el
-    entrenamiento y el servicio calculen distinto una misma variable
-    (training/serving skew) es el error mas caro y mas dificil de detectar de un
-    proyecto de ML, porque el modelo no falla: solo predice mal.
-
-    Lo que no se sabe viaja como NaN a proposito, para que el SimpleImputer del
-    pipeline lo rellene con la mediana igual que durante el entrenamiento.
-    Inventar un cero seria peor: le diria al modelo un dato falso.
-    """
-    faltante = float("nan")
-    anio_actual = anio_actual or pd.Timestamp.today().year
-
-    def _num(valor):
-        return faltante if valor is None or pd.isna(valor) else float(valor)
-
-    kms_actual = _num(kms_actual)
-    kms_visita_ant = _num(kms_visita_ant)
-    dias_desde_visita_ant = _num(dias_desde_visita_ant)
-
-    # Kilometros recorridos desde el ingreso anterior. El odometro no baja: un
-    # valor negativo es un error de digitacion y se anula.
-    km_desde_ant = kms_actual - kms_visita_ant
-    if pd.isna(km_desde_ant) or km_desde_ant < 0:
-        km_desde_ant = faltante
-
-    # Intensidad de uso. Division por cero protegida: dos ingresos el mismo dia
-    # no definen ningun ritmo.
-    km_por_dia = faltante
-    if not pd.isna(km_desde_ant) and not pd.isna(dias_desde_visita_ant) and dias_desde_visita_ant > 0:
-        km_por_dia = km_desde_ant / dias_desde_visita_ant
-
-    # Si el asesor no conoce la mediana historica del vehiculo, el ultimo
-    # intervalo observado es la mejor aproximacion disponible a su costumbre.
-    if ritmo_mediano_previo is None or pd.isna(ritmo_mediano_previo):
-        ritmo_mediano_previo = dias_desde_visita_ant
-
-    dias_para_10k = faltante
-    if not pd.isna(km_por_dia) and km_por_dia > 0:
-        dias_para_10k = min(config.REGLA_MANTENIMIENTO_KMS / km_por_dia, 3000.0)
-
-    # Regla de negocio: 365 dias o 10.000 km, lo que ocurra primero.
-    regla_preventiva = float(config.REGLA_MANTENIMIENTO_DIAS)
-    if not pd.isna(dias_para_10k):
-        regla_preventiva = min(regla_preventiva, dias_para_10k)
-
-    antiguedad = faltante
-    if anio_modelo is not None and not pd.isna(anio_modelo):
-        antiguedad = max(0.0, float(anio_actual - float(anio_modelo)))
-
-    fila = {
-        "Tipo Cargo": tipo_cargo,
-        "Tipo de Trabajo": tipo_trabajo,
-        "Kms.": kms_actual,
-        "Antiguedad_Vehiculo": antiguedad,
-        "Dias_En_Taller": _num(dias_en_taller),
-        "Mes_Entrada": float(mes_entrada or pd.Timestamp.today().month),
-        "Num_Visita": float(visitas_previas),
-        "Dias_Desde_Visita_Ant": dias_desde_visita_ant,
-        "Km_Desde_Visita_Ant": km_desde_ant,
-        "Ritmo_Mediano_Previo": _num(ritmo_mediano_previo),
-        "Ritmo_Max_Previo": _num(ritmo_mediano_previo),
-        "Km_Por_Dia": km_por_dia,
-        "Km_Por_Dia_Medio": km_por_dia,
-        "Dias_Para_10k_Km": dias_para_10k,
-        "Regla_Preventiva_Dias": regla_preventiva,
-        "Km_Sobre_Umbral_10k": km_desde_ant / config.REGLA_MANTENIMIENTO_KMS,
-        "Ciclos_10k_Acumulados": kms_actual / config.REGLA_MANTENIMIENTO_KMS,
-        "Es_Vehiculo_Vendido": int(es_vehiculo_vendido),
-    }
-    return pd.DataFrame([fila])
-
-
 def construir_catalogo_vehiculos(df_visitas: pd.DataFrame) -> pd.DataFrame:
     """Ficha por chasis con su ULTIMA visita y su historia ya calculada.
 
@@ -497,3 +426,55 @@ def construir_catalogo_vehiculos(df_visitas: pd.DataFrame) -> pd.DataFrame:
     ).astype(bool)
 
     return catalogo
+
+
+# Columnas de cada visita que hacen falta para volver a calcular la historia de
+# un VIN. Es lo minimo: el historial se carga entero en memoria en la API.
+COLUMNAS_HISTORIAL = [
+    config.COLUMNA_VIN, config.COLUMNA_OT, config.COLUMNA_FECHA_ENTRADA, config.COLUMNA_FECHA_CIERRE,
+    config.COLUMNA_KMS, config.COLUMNA_GAMA, config.COLUMNA_ANO,
+    config.COLUMNA_TIPO_CARGO, config.COLUMNA_TIPO_TRABAJO, "Es_Alistamiento_OT",
+]
+
+
+def historial_para_servicio(df_visitas: pd.DataFrame) -> pd.DataFrame:
+    """Visitas consolidadas, reducidas a lo que la API necesita para recalcular."""
+    return df_visitas[COLUMNAS_HISTORIAL].sort_values(
+        [config.COLUMNA_VIN, config.COLUMNA_FECHA_ENTRADA]
+    ).reset_index(drop=True)
+
+
+def ficha_con_ingreso_nuevo(
+    visitas_vin: pd.DataFrame,
+    fecha_entrada,
+    fecha_cierre,
+    kms: float,
+    tipo_cargo: str,
+    tipo_trabajo: str,
+) -> pd.Series:
+    """Ficha del vehiculo como si el ingreso de HOY ya estuviera en la base.
+
+    El modelo no necesita reentrenarse para atender un carro que acaba de
+    entrar: lo que cambia es su HISTORIA (una visita mas, un intervalo nuevo, un
+    ritmo y unos km/dia distintos). Se agrega la visita al final de las que ya
+    tenia y se pasa todo por construir_catalogo_vehiculos(), la misma funcion
+    que arma el catalogo del entrenamiento. Asi no hay una segunda version de
+    las formulas que se pueda desalinear (training/serving skew).
+    """
+    previas = visitas_vin.sort_values(config.COLUMNA_FECHA_ENTRADA)
+    anios = previas[config.COLUMNA_ANO].dropna()
+    nueva = {
+        config.COLUMNA_VIN: previas[config.COLUMNA_VIN].iloc[-1],
+        config.COLUMNA_OT: "INGRESO_NUEVO",
+        config.COLUMNA_FECHA_ENTRADA: pd.Timestamp(fecha_entrada),
+        config.COLUMNA_FECHA_CIERRE: pd.Timestamp(fecha_cierre),
+        config.COLUMNA_KMS: float(kms),
+        config.COLUMNA_GAMA: previas[config.COLUMNA_GAMA].iloc[-1],
+        config.COLUMNA_ANO: anios.iloc[-1] if len(anios) else np.nan,
+        config.COLUMNA_TIPO_CARGO: tipo_cargo,
+        config.COLUMNA_TIPO_TRABAJO: tipo_trabajo,
+        # Un carro que ya tenia historia no puede estar entrando a alistamiento.
+        "Es_Alistamiento_OT": False,
+    }
+    visitas = pd.concat([previas, pd.DataFrame([nueva])], ignore_index=True)
+    return construir_catalogo_vehiculos(visitas).iloc[0]
