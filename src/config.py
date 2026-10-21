@@ -5,10 +5,9 @@ from pathlib import Path  # Libreria estandar para manejar rutas de forma segura
 RUTA_RAIZ = Path(__file__).resolve().parent.parent # es la carpeta raiz del proyecto
 RUTA_DATA_RAW = RUTA_RAIZ / "data" / "Base de datos Limpia..csv" #esto lo que hace es concatenar la ruta raiz con la carpeta data y el nombre del archivo csv. el operador / de Path hace que funcione en cualquier sistema operativo.
 RUTA_MODELO_SERIALIZADO = RUTA_RAIZ / "models" / "modelo_retencion.joblib" #esto es la ruta donde se guarda el modelo entrenado, para que main.py lo pueda cargar y usar en el endpoint de ingreso.
-RUTA_CATALOGO_VEHICULOS = RUTA_RAIZ / "models" / "catalogo_vehiculos.joblib" #esto es la ruta donde se guarda el catalogo de vehiculos (marca, gama, antiguedad) que se construye en data.py y se usa en features.py para crear variables de ingenieria.
+RUTA_CATALOGO_VEHICULOS = RUTA_RAIZ / "models" / "catalogo_vehiculos.joblib" #una ficha por VIN (su ultima visita ya con historia calculada). La API no lo carga: queda como foto validada del parque y las pruebas lo usan para elegir VINs reales.
 RUTA_HISTORIAL_VISITAS = RUTA_RAIZ / "models" / "historial_visitas.joblib" #todas las visitas consolidadas por VIN: permite que la API recalcule la historia cuando el carro entra HOY, sin esperar a reentrenar.
 RUTA_MODELO_FUGA = RUTA_RAIZ / "models" / "modelo_fuga.joblib" #clasificador de fuga: responde "este cliente va a dejar de volver?", que es la pregunta que mueve la accion comercial.
-RUTA_MODELOS_FUGA_SEGMENTADOS = RUTA_RAIZ / "models" / "modelos_fuga_segmentados.joblib" #un clasificador por origen (vendidos / externos), pedidos por el negocio para poder actuar distinto sobre cada poblacion.
 RUTA_METRICAS = RUTA_RAIZ / "models" / "metricas_entrenamiento.json" #evidencia reproducible de la comparacion global vs segmentado; la tesis cita este archivo, no la consola.
 
 SEMILLA_ALEATORIA = 42 #esto es la semilla que se usa para que los resultados sean reproducibles. Si se cambia, el modelo puede dar resultados distintos cada vez que se entrena.
@@ -203,7 +202,3 @@ UMBRAL_DECISION_FUGA = 0.50
 # cortes optimos (RandomForest), boosting secuencial (HistGradientBoosting) y
 # bagging con cortes aleatorios (ExtraTrees).
 MODELOS_CLASIFICACION = ("RandomForest", "HistGradientBoosting", "ExtraTrees")
-
-# El negocio pidio poder actuar distinto sobre cada poblacion, asi que ademas
-# del modelo global se entrena y se congela uno por origen.
-ENTRENAR_SEGMENTADO_POR_ORIGEN = True

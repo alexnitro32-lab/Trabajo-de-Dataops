@@ -69,6 +69,36 @@ def test_solo_existe_el_endpoint_de_ingreso():
     assert rutas == {"/predict/vin/{vin}/ingreso"}
 
 
+def test_health_para_monitoreo():
+    """/health responde 200 y confirma que los tres artefactos .joblib cargaron."""
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["estado"] == "activo"
+    assert response.json()["modelos_cargados"] is True
+
+
+def test_metrics_cuenta_peticiones_y_errores():
+    """El middleware suma cada petición, y las que terminan en 4xx cuentan como error."""
+    antes = client.get("/metrics").json()
+    client.post("/predict/vin/XXXXXXXX/ingreso", json={"kilometraje": -5})   # 422
+    despues = client.get("/metrics").json()
+
+    # +2: la petición que falló y la primera consulta a /metrics, que el
+    # middleware registra al terminar (después de armar su propia respuesta).
+    assert despues["peticiones_totales"] == antes["peticiones_totales"] + 2
+    assert despues["errores_totales"] == antes["errores_totales"] + 1
+    assert despues["latencia_p95_ms"] >= despues["latencia_p50_ms"] >= 0
+
+
+def test_error_de_validacion_explica_el_campo():
+    """El 422 personalizado dice qué campo falló, sin perder el detalle de Pydantic."""
+    response = client.post("/predict/vin/XXXXXXXX/ingreso", json={"kilometraje": "mucho"})
+    assert response.status_code == 422
+    cuerpo = response.json()
+    assert cuerpo["detalle"] == "Datos de entrada inválidos"
+    assert cuerpo["errores"][0]["loc"] == ["body", "kilometraje"]
+
+
 def test_ingreso_exitoso(catalogo, historial):
     """Con el ingreso de hoy el carro suma una visita y se vuelve a predecir."""
     vin = str(catalogo[catalogo["Apto_Para_Modelo"]].index[0])

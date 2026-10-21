@@ -13,7 +13,7 @@ Este proyecto toma la base transaccional de órdenes de trabajo de un taller aut
 | Regresión | ¿En cuántos días vuelve este vehículo? | Agendar, dimensionar bahías, planear repuestos |
 | Clasificación de fuga | ¿Este cliente va a dejar de volver? | Priorizar a quién llamar antes de perderlo |
 
-Ambos se congelan en disco y se exponen como una **API REST** con un solo endpoint de predicción: el asesor registra el ingreso del vehículo y recibe cuándo volverá, si se va a ir y **entre qué fechas hay que llamarlo**. Todo respaldado por pruebas automáticas e integración continua.
+Ambos se congelan en disco y se exponen como una **API REST** con un solo endpoint de predicción: el asesor registra el ingreso del vehículo y recibe cuándo volverá, si se va a ir y **entre qué fechas hay que llamarlo**. La API está **instrumentada** (logs JSON, métricas de tráfico y latencia, `/health`), se empaqueta en una **imagen Docker** y todo está respaldado por pruebas automáticas e integración continua.
 
 **La unidad de predicción es el chasis (VIN), que en esta base equivale al cliente** — no la gama ni el modelo del vehículo. Es una decisión de planteamiento con consecuencias en todo el pipeline, justificada en la [sección 4](#el-sujeto-el-chasis-no-la-gama).
 
@@ -24,6 +24,7 @@ Lo que logra, concretamente:
 - **Un contrato de datos explícito en las dos fronteras.** Pandera valida el archivo del ERP y cada etapa del pipeline antes de entrenar; Pydantic rechaza las peticiones inválidas de la API antes de que toquen el modelo.
 - **Decisiones de modelado respaldadas por evidencia.** Cada entrenamiento recalcula el diagnóstico, la comparación de tres algoritmos y el contraste global contra segmentado, y deja todo en `models/metricas_entrenamiento.json`.
 - **Verificación automática en cada push.** GitHub Actions reconstruye el entorno desde cero, reentrena y corre las pruebas en una máquina limpia.
+- **Observable en producción.** Cada evento sale como una línea JSON, cada petición se mide, y `/health` y `/metrics` permiten saber en segundos si el servicio vive, cuánto falla y qué tan rápido responde.
 
 Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 11,5 % de la variabilidad; por eso la API entrega una ventana del ancho de su error medio en vez de un día. La clasificación de fuga sí llega a un nivel utilizable (AUC 0,727), y es la que se recomienda para operar. Ver [sección 6](#6-qué-le-falta-y-qué-mejoraría).
 
@@ -90,7 +91,7 @@ Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 
    ┌────────────────┐ ┌──────────────────────────────────┐ │
    │ RandomForest   │ │ src/modelos.py  3 CLASIFICADORES │ │
    │ Regressor      │ │ RandomForest / HistGB / ExtraTr. │ │
-   │                │ │ global + uno por origen          │ │
+   │                │ │ global (contrastado por origen)  │ │
    └────────────────┘ └──────────────────────────────────┘ │
             │               │                              │
             ▼               ▼                              │
@@ -102,8 +103,7 @@ Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 
             │               │                              ▼
             ▼               ▼               models/catalogo_vehiculos.joblib
    modelo_retencion    modelo_fuga.joblib   models/historial_visitas.joblib
-      .joblib          modelos_fuga_segmentados.joblib
-                       metricas_entrenamiento.json
+      .joblib          metricas_entrenamiento.json
 
    src/actualizar_catalogo.py regenera SOLO el catálogo y el historial desde
    un CSV nuevo, sin reentrenar: lo que cambia a diario son las visitas.
@@ -119,8 +119,17 @@ Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 
             ▼
    ┌─────────────────────┐
    │  main.py            │  carga los .joblib UNA vez al arrancar
-   │  API FastAPI        │
+   │  API FastAPI        │  (dentro de la imagen Docker o con uvicorn)
    └─────────────────────┘
+            │
+            ▼
+   ┌─────────────────────┐  middleware de observabilidad (TODA petición)
+   │  src/metrics.py     │  · mide la latencia y cuenta éxito / error
+   │  src/logger.py      │  · log JSON de advertencia si pasa de 200 ms
+   └─────────────────────┘  · lo acumulado se lee en GET /metrics
+            │
+            ├── GET /health    ¿vive y cargaron los modelos?
+            ├── GET /metrics   tráfico, tasa de error, latencia p50 / p95
             │
             └── POST /predict/vin/{vin}/ingreso
                        │
@@ -151,6 +160,7 @@ Lo que **no** logra: decir el día exacto del regreso. La regresión explica el 
    JSON: { "prediccion_dias_retorno": 180.0,
            "riesgo_de_fuga": { "probabilidad_fuga": 0.78, "alerta": true },
            "plan_de_llamada": { "estado": "llamar_ahora", "mensaje": "…" } }
+   + log JSON "prediccion_exitosa" con VIN, días, probabilidad y estado
 ```
 
 **La clave del diagrama:** el bloque de preprocesamiento aparece una sola vez, dentro del `.joblib`, y la historia del vehículo se calcula con una sola función, `construir_catalogo_vehiculos()`, tanto al entrenar como al servir. Las dos fases las comparten físicamente. Eso es lo que elimina el *training/serving skew*.
@@ -174,22 +184,25 @@ Trabajo de Dataops/
 │   ├── modelos.py                  Catálogo de estimadores a comparar
 │   ├── evaluate.py                 Métricas de regresión y de clasificación
 │   ├── train.py                    Orquestador: diagnostica, compara, entrena y serializa
-│   └── actualizar_catalogo.py      Regenera catálogo e historial desde un CSV nuevo, sin reentrenar
+│   ├── actualizar_catalogo.py      Regenera catálogo e historial desde un CSV nuevo, sin reentrenar
+│   ├── logger.py                   Logger JSON de una línea por evento (capa online)
+│   └── metrics.py                  Acumulador thread-safe de peticiones, errores y latencias (capa online)
 │
 ├── models/                         Artefactos congelados (salida de train.py)
 │   ├── modelo_retencion.joblib     Regresión: ¿en cuántos días vuelve?
 │   ├── modelo_fuga.joblib          Clasificación: ¿va a dejar de volver?
-│   ├── modelos_fuga_segmentados.joblib  Un clasificador por origen (evidencia; la API no lo usa)
-│   ├── catalogo_vehiculos.joblib   Ficha + historia de la última visita por VIN
 │   ├── historial_visitas.joblib    Todas las visitas por VIN: la API recalcula la historia con ellas
+│   ├── catalogo_vehiculos.joblib   Ficha validada de la última visita por VIN (la usan las pruebas)
 │   └── metricas_entrenamiento.json Evidencia citable: diagnóstico, CV y comparaciones
 │
 ├── main.py                         API REST con FastAPI (capa online)
 │
 ├── tests/
-│   └── test_api.py                 45 pruebas de API, datos, contrato y métricas
+│   └── test_api.py                 48 pruebas de API, observabilidad, datos, contrato y métricas
 │
 ├── .github/workflows/ci.yml        CI: ruff → train → pytest
+├── Dockerfile                      Imagen de la API: solo src/, models/ y main.py
+├── .dockerignore                   Deja fuera de la imagen datos, pruebas y entorno virtual
 ├── pyproject.toml                  Configuración de pytest y ruff
 └── requirements.txt                Dependencias del entorno
 ```
@@ -220,7 +233,8 @@ Trabajo de Dataops/
 - **`evaluate.py`** no conoce el modelo. Recibe dos vectores de números y devuelve un diccionario. Se puede reutilizar con cualquier otro modelo.
 - **`train.py`** es el director de orquesta: llama a los demás en orden y congela el resultado. No define lógica propia.
 - **`actualizar_catalogo.py`** es la mitad de `train.py` que cambia a diario: carga, valida y consolida el CSV y congela el catálogo y el historial, sin tocar los modelos.
-- **`main.py`** no importa `train.py`. Solo `config.py`, `data.py` (para recalcular la historia con las mismas fórmulas y aplicar el plan de mantenimiento) y `features.py`. **Esa es la frontera entre entrenar y servir**, y está dibujada a propósito.
+- **`logger.py`** y **`metrics.py`** solo existen para la capa online. No saben nada del modelo: uno formatea eventos como JSON, el otro cuenta peticiones y calcula percentiles de latencia. `metrics.py` usa un `Lock` porque FastAPI atiende peticiones en varios hilos a la vez.
+- **`main.py`** no importa `train.py`. Solo `config.py`, `data.py` (para recalcular la historia con las mismas fórmulas y aplicar el plan de mantenimiento), `features.py` y las dos piezas de observabilidad. **Esa es la frontera entre entrenar y servir**, y está dibujada a propósito.
 
 ---
 
@@ -243,7 +257,7 @@ La **gama tampoco entra**, y esa sí es una renuncia medible. En esta base está
 
 Poco más de un punto de AUC a cambio de robustez: una gama nunca vista deja de ser un problema. La antigüedad se conserva porque su costo adicional es marginal y describe una realidad mecánica, no una etiqueta comercial. La gama sigue viajando en el catálogo **solo como dato de pantalla**.
 
-Tampoco existe un "cada cuánto vuelve la gente" global: `evaluate.diagnostico_intervalos()` separa tres poblaciones porque describen tres momentos del ciclo de vida y promediarlas daría una cifra que no le sirve a ninguna.
+Tampoco existe un "cada cuánto vuelve la gente" global: `diagnostico.diagnosticar_ritmos()` separa tres poblaciones porque describen tres momentos del ciclo de vida y promediarlas daría una cifra que no le sirve a ninguna.
 
 | | Vehículos | Intervalos | Días (mediana) | Días (p25–p75) | Km (mediana) | Vuelve ≤ 365 d |
 |---|---:|---:|---:|---:|---:|---:|
@@ -356,7 +370,7 @@ Por último se contrasta un modelo global contra uno por **origen del vehículo*
 | Global, sobre **externos** | 0,7284 | 0,448 | 0,570 | 0,502 | 1.733 | 1.062 |
 | Segmentado, sobre externos | 0,7266 | 0,449 | 0,576 | 0,505 | 1.743 | 1.047 |
 
-En vehículos propios el segmentado comete **menos errores de los dos tipos**. El AUC es casi idéntico — ambos ordenan igual de bien — pero el segmentado está **mejor calibrado** para esa población: sus probabilidades caen donde el umbral las aprovecha mejor. En externos es prácticamente un empate. La ganancia es pequeña (6 falsos positivos y 3 falsos negativos menos), así que **la API usa solo el modelo global**, con una sola probabilidad y una sola alerta, que es lo que el asesor necesita para decidir. Los modelos segmentados se siguen entrenando y congelando como evidencia, por si el negocio decide actuar distinto sobre cada origen.
+En vehículos propios el segmentado comete **menos errores de los dos tipos**. El AUC es casi idéntico — ambos ordenan igual de bien — pero el segmentado está **mejor calibrado** para esa población: sus probabilidades caen donde el umbral las aprovecha mejor. En externos es prácticamente un empate. La ganancia es pequeña (6 falsos positivos y 3 falsos negativos menos), así que **la API usa solo el modelo global**, con una sola probabilidad y una sola alerta, que es lo que el asesor necesita para decidir. El contraste se recalcula en cada entrenamiento y queda en `metricas_entrenamiento.json`, así que si el negocio decide actuar distinto sobre cada origen la evidencia ya está; los modelos segmentados en sí no se congelan, porque nada los consume.
 
 > **Cómo leer esa tabla.** Los AUC de segmentos distintos **no son comparables entre sí**, porque cada uno se mide contra la dificultad de su propia población. Lo comparable es global contra segmentado *dentro de la misma fila*, que es como está armada.
 
@@ -396,6 +410,25 @@ El MAE se lee de `metricas_entrenamiento.json` al arrancar, así que la ventana 
 
 **El CI corre `ruff` → `train` → `pytest`**, en ese orden: ruff falla en segundos y es lo más barato; el entrenamiento va antes que las pruebas porque estas cargan los `.joblib` y en una máquina limpia hay que generarlos. Reentrenar en cada push es lo que demuestra que el pipeline es reproducible de verdad.
 
+### Observabilidad: saber qué pasa cuando nadie está mirando
+
+Una API en producción que solo devuelve respuestas es una caja negra: si se pone lenta o empieza a fallar, nadie se entera hasta que se queja un asesor. Tres piezas lo resuelven:
+
+- **Logs estructurados (`src/logger.py`).** Cada evento sale como **una línea JSON** con `timestamp`, `level`, `mensaje` y los campos propios del evento (`vin`, `latencia_ms`, `probabilidad_fuga`…). Una plataforma como Render o cualquier agregador de logs puede filtrar por campo — "todas las predicciones con alerta", "todos los 404" — sin parsear texto libre. Se registran: predicción exitosa, VIN sin historial, error de validación (422), petición lenta (> 200 ms) y las consultas a `/health` y `/metrics`.
+- **Middleware de métricas (`src/metrics.py`).** Envuelve **todas** las peticiones: mide la latencia con `perf_counter`, cuenta como error cualquier respuesta 4xx/5xx o excepción, y guarda las últimas 1.000 latencias para calcular p50 y p95. Se reporta el **p95** y no solo el promedio porque el promedio esconde a los usuarios que esperan mucho.
+- **`GET /health` y `GET /metrics`.** El primero responde en milisegundos si el servicio vive y si los tres `.joblib` cargaron, que es lo que un balanceador o un monitor necesita preguntar cada pocos segundos. El segundo expone el acumulado de tráfico, tasa de error y latencias.
+
+Las métricas viven **en memoria**: se reinician con el servidor y cada réplica cuenta lo suyo. Es suficiente para un servicio de una sola instancia; con varias réplicas se reemplazaría por Prometheus o el sistema de métricas de la plataforma.
+
+### Despliegue con Docker
+
+El `Dockerfile` parte de `python:3.12-slim`, instala las dependencias en una capa propia (para que cambiar el código no obligue a reinstalar pandas y scikit-learn) y copia **solo lo que la inferencia necesita**: `src/`, `models/` y `main.py`. Los datos crudos, las pruebas y el entorno virtual quedan fuera por `.dockerignore`: la imagen sirve el modelo, no lo entrena. Uvicorn escucha en `0.0.0.0:8000` para ser alcanzable desde fuera del contenedor.
+
+```bash
+docker build -t retencion-api .
+docker run -p 8000:8000 retencion-api
+```
+
 ---
 
 ## 5. Qué recibe y devuelve la API
@@ -403,12 +436,14 @@ El MAE se lee de `metricas_entrenamiento.json` al arrancar, así que la ventana 
 | Método | Ruta | Función |
 |---|---|---|
 | `POST` | `/predict/vin/{vin}/ingreso` | Registra el ingreso del vehículo y devuelve regreso estimado, riesgo de fuga y plan de llamada |
-| `GET` | `/` | Health check: confirma que el servicio vive y que los artefactos cargaron |
+| `GET` | `/` | Estado detallado: qué artefactos cargaron, algoritmo de fuga, vehículos en historial, margen de error y fecha de corte |
+| `GET` | `/health` | Health check corto para monitoreo: ¿vive y cargaron los modelos? |
+| `GET` | `/metrics` | Peticiones totales, errores, tasa de error y latencia promedio / p50 / p95 |
 | `GET` | `/docs` | Swagger UI autogenerado, con el contrato siempre al día |
 
 Hay un solo endpoint de predicción a propósito: toda predicción parte de una visita registrada, así que la historia del vehículo siempre está al día con lo que el asesor tiene enfrente, aunque la base de datos todavía no lo sepa.
 
-### `GET /` — Health check
+### `GET /` — Estado detallado
 
 ```json
 {
@@ -424,6 +459,25 @@ Hay un solo endpoint de predicción a propósito: toda predicción parte de una 
 ```
 
 Si los `.joblib` no existen el servidor **no se cae**: arranca con `modelo_cargado: false` o `historial_cargado: false`, para que el health check siga respondiendo y el problema se pueda diagnosticar en vez de quedarse a oscuras.
+
+### `GET /health` y `GET /metrics` — Monitoreo
+
+```json
+{ "estado": "activo", "servicio": "API Retención Automotor.co", "modelos_cargados": true, "version_api": "6.0.0" }
+```
+
+```json
+{
+  "peticiones_totales": 120,
+  "errores_totales": 6,
+  "tasa_error_pct": 5.0,
+  "latencia_promedio_ms": 38.2,
+  "latencia_p50_ms": 31.5,
+  "latencia_p95_ms": 92.7
+}
+```
+
+`modelos_cargados` es `true` solo si cargaron los tres artefactos que la predicción necesita: regresor, clasificador de fuga e historial. Los errores incluyen los 4xx: un 404 por un VIN mal digitado cuenta, porque es una petición que no le sirvió al asesor.
 
 ### `POST /predict/vin/{vin}/ingreso`
 
@@ -508,7 +562,7 @@ El historial está incompleto para algunos chasis (hay VIN sin año de modelo). 
 
 | Código | Cuándo ocurre |
 |---|---|
-| `422` | El cuerpo no cumple el contrato (falta el kilometraje, llega texto donde va número, un tipo de trabajo que no existe), el odómetro es menor que el de la visita anterior, o las fechas son incoherentes |
+| `422` | El cuerpo no cumple el contrato (falta el kilometraje, llega texto donde va número, un tipo de trabajo que no existe), el odómetro es menor que el de la visita anterior, o las fechas son incoherentes. Si el fallo es de Pydantic, la respuesta trae `detalle` y la lista `errores` con el campo exacto, y queda registrado en el log |
 | `404` | El VIN no tiene historial en el concesionario: sería su primer ingreso y no hay ritmo del que estimar su regreso |
 | `409` | La fecha de ingreso es igual o anterior al último ingreso registrado del VIN |
 | `500` | Falta algún `.joblib` del modelo o del historial |
@@ -545,7 +599,7 @@ Y una observación que vale para el negocio: **aplicar el plan de fábrica tal c
 
 ### El techo que queda
 
-El límite no es el algoritmo — los tres clasificadores quedaron dentro de 0,008 de AUC entre sí. Es la información disponible:
+El límite no es el algoritmo — los tres clasificadores quedaron dentro de 0,009 de AUC entre sí. Es la información disponible:
 
 1. **Lo que hace volver a un cliente no está en los datos.** Si quedó conforme, qué pagó, si le cumplieron la fecha de entrega. El ERP registra la transacción, no la experiencia. La demora en taller es lo único que se pudo rescatar de esa dimensión.
 2. **El objetivo es muy disperso.** Coeficiente de variación del 143 %: media de 144 días contra mediana de 77, con un máximo de 2.936. Hay al menos dos poblaciones mezcladas — quien vuelve al mantenimiento de rutina y quien desaparece por años.

@@ -236,19 +236,6 @@ def ejecutar_entrenamiento(): #Ejecuta el ciclo de vida completo de entrenamient
         ganador, df_fuga[columnas_fuga], df_fuga[config.TARGET_FUGA].astype(int)
     )
 
-    # --- Clasificadores por origen: el negocio quiere poder actuar distinto ---
-    modelos_segmentados = {}
-    if config.ENTRENAR_SEGMENTADO_POR_ORIGEN:
-        for valor, nombre_seg in ((1, "vendidos"), (0, "externos")):
-            sub = df_fuga[df_fuga["Es_Vehiculo_Vendido"] == valor]
-            if len(sub) == 0:
-                continue
-            modelos_segmentados[nombre_seg] = modelos.ajustar_clasificador(
-                ganador, sub[columnas_fuga], sub[config.TARGET_FUGA].astype(int)
-            )
-            print(f"   FUGA [{nombre_seg}] entrenado con {len(sub)} filas / "
-                  f"{sub[config.COLUMNA_GRUPO].nunique()} vehiculos")
-
     importancias = _importancias(modelo_fuga)
     print("\n   Top 10 variables del clasificador de fuga:")
     for nombre, peso in importancias.head(10).items():
@@ -259,9 +246,6 @@ def ejecutar_entrenamiento(): #Ejecuta el ciclo de vida completo de entrenamient
 
     joblib.dump(pipeline_regresion, config.RUTA_MODELO_SERIALIZADO, compress=3)
     joblib.dump({"modelo": modelo_fuga, "algoritmo": ganador}, config.RUTA_MODELO_FUGA, compress=3)
-    if modelos_segmentados:
-        joblib.dump({"modelos": modelos_segmentados, "algoritmo": ganador},
-                    config.RUTA_MODELOS_FUGA_SEGMENTADOS, compress=3)
 
     # El catalogo se valida antes de congelarlo: tiene que traer exactamente las
     # columnas que el modelo consume, o el endpoint por VIN fallaria en

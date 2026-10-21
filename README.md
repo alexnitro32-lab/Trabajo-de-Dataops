@@ -99,6 +99,17 @@ También se puede ver desde `/docs`: despliega **`GET /` — Estado del servicio
 
 Si `modelo_cargado` o `historial_cargado` salen en `false`, ve a [Problemas comunes](#problemas-comunes).
 
+### Con Docker (alternativa)
+
+Si tienes Docker instalado, no necesitas Python ni el entorno virtual:
+
+```bash
+docker build -t retencion-api .
+docker run -p 8000:8000 retencion-api
+```
+
+La API queda igual en **<http://127.0.0.1:8000/docs>**. La imagen solo trae lo necesario para predecir (`src/`, `models/` y `main.py`); no trae los datos crudos ni las pruebas.
+
 ---
 
 ## Cómo se usa
@@ -217,10 +228,29 @@ La **ventana de llamada** va de `fecha estimada − margen de error` a `fecha es
 | Método | Ruta | Para qué sirve |
 |---|---|---|
 | `POST` | `/predict/vin/{vin}/ingreso` | Registra el ingreso y predice regreso, fuga y fechas de llamada |
-| `GET` | `/` | Confirma que el servicio vive y que los modelos cargaron |
+| `GET` | `/` | Estado detallado: qué cargó, cuántos vehículos hay en el historial, margen de error |
+| `GET` | `/health` | Health check corto para el monitoreo: ¿vive y cargaron los modelos? |
+| `GET` | `/metrics` | Peticiones, errores, tasa de error y latencias (promedio, p50, p95) desde que arrancó |
 | `GET` | `/docs` | Documentación interactiva (Swagger UI) |
 
 El contrato completo está en [ARQUITECTURA.md § 5](ARQUITECTURA.md#5-qué-recibe-y-devuelve-la-api).
+
+---
+
+## Observabilidad
+
+La API deja rastro de lo que hace para que se pueda vigilar en producción:
+
+- **Logs en JSON**, una línea por evento, en la salida estándar. Se registran las predicciones (VIN, días estimados, probabilidad de fuga, estado de la llamada), los VIN sin historial, los errores de validación y las peticiones que tardan más de 200 ms.
+- **Métricas en `/metrics`**: un middleware mide todas las peticiones. Las respuestas 4xx y 5xx cuentan como error.
+
+Ejemplo de una línea de log:
+
+```json
+{"timestamp": "2026-10-20T15:02:11Z", "level": "INFO", "logger": "automotor_api", "mensaje": "Predicción de retención ejecutada exitosamente", "evento": "prediccion_exitosa", "vin": "DEU822806", "dias_retorno_predichos": 180.0, "probabilidad_fuga": 0.7758, "alerta_fuga": true, "estado_llamada": "llamar_ahora"}
+```
+
+Las métricas viven en memoria: se reinician cada vez que se reinicia la API.
 
 ---
 
@@ -230,7 +260,7 @@ El contrato completo está en [ARQUITECTURA.md § 5](ARQUITECTURA.md#5-qué-reci
 python -m pytest
 ```
 
-Esperado: **45 passed**.
+Esperado: **48 passed**.
 
 Para revisar el estilo del código:
 
@@ -264,7 +294,7 @@ El repositorio ya trae los modelos entrenados en `models/`, así que **no necesi
 python -m src.train
 ```
 
-Tarda un par de minutos (valida de forma cruzada, así que entrena varias veces) y escribe seis archivos en `models/`: los tres modelos, el catálogo, el historial de visitas y `metricas_entrenamiento.json` con toda la evidencia numérica.
+Tarda un par de minutos (valida de forma cruzada, así que entrena varias veces) y escribe cinco archivos en `models/`: los dos modelos, el catálogo, el historial de visitas y `metricas_entrenamiento.json` con toda la evidencia numérica.
 
 ---
 
