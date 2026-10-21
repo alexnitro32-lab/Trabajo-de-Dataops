@@ -1,4 +1,5 @@
 import math
+from threading import Lock
 
 class RegistroMetricas:
     """

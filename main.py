@@ -2,15 +2,24 @@
 # sistema del concesionario puede registrar el ingreso de un chasis y saber cuando vuelve, si se va a ir y cuando hay que llamarlo.
 
 import json
+import time
 from datetime import date, timedelta
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import joblib
 import numpy as np
 import pandas as pd
 from src import config, data, features
+from src.logger import obtener_logger
+from src.metrics import METRICAS_API
+
+# Logger estructurado en JSON (una linea por evento, lista para Render o cualquier monitoreo)
+logger = obtener_logger("automotor_api")
 
 # INICIALIZACION DE LA APLICACION FASTAPI
 app = FastAPI(
@@ -26,6 +35,46 @@ app = FastAPI(
     ),
     version="6.0.0"
 )
+
+
+# MIDDLEWARE DE OBSERVABILIDAD: mide cuanto tarda CADA peticion, la suma al
+# acumulador de metricas (exito/fallo) y avisa en el log si pasa de 200 ms.
+@app.middleware("http")
+async def middleware_observabilidad(request: Request, call_next):
+    inicio_tiempo = time.perf_counter()
+    exitoso = True
+    try:
+        response = await call_next(request)
+        if response.status_code >= 400:
+            exitoso = False
+        return response
+    except Exception:
+        exitoso = False
+        raise
+    finally:
+        latencia_ms = round((time.perf_counter() - inicio_tiempo) * 1000, 2)
+        METRICAS_API.registrar_peticion(latencia_ms=latencia_ms, exitoso=exitoso)
+        if latencia_ms > 200.0:
+            logger.warning(
+                "Petición lenta detectada",
+                extra={"ruta": request.url.path, "metodo": request.method, "latencia_ms": latencia_ms},
+            )
+
+
+# MANEJADOR DE ERRORES DE VALIDACION: el 422 de Pydantic sigue igual, pero
+# ahora queda registrado en el log. jsonable_encoder evita que un error con
+# objetos no serializables (p. ej. un ValueError dentro de "ctx") rompa el JSON.
+@app.exception_handler(RequestValidationError)
+async def manejador_error_validacion(request: Request, exc: RequestValidationError):
+    errores = jsonable_encoder(exc.errors())
+    logger.error(
+        "Error de validación en la petición recibida",
+        extra={"ruta": request.url.path, "metodo": request.method, "errores": errores},
+    )
+    return JSONResponse(
+        status_code=422,
+        content={"detalle": "Datos de entrada inválidos", "errores": errores},
+    )
 
 # CARGA DEL PIPELINE COMPLETO CONGELADO (.joblib) MUY IMPORTANTE: esto esta FUERA de las funciones, por lo tanto se ejecuta UNA SOLA VEZ cuando arranca el servidor, no en cada peticion. Si estuviera dentro del endpoint, cada usuario obligaria a leer el modelo del disco otra vez.
 try:
@@ -302,6 +351,27 @@ def home(): #Endpoint de comprobación de estado (Health Check). Un health check
     }
 
 
+@app.get("/health", tags=["Monitoreo"], summary="Health check para el monitoreo")
+def health_check():
+    """Verifica que el servicio esté vivo y que los artefactos .joblib hayan cargado."""
+    modelos_cargados = pipeline is not None and historial is not None and modelo_fuga is not None
+    logger.info("Health check consultado", extra={"modelos_cargados": modelos_cargados})
+    return {
+        "estado": "activo",
+        "servicio": "API Retención Automotor.co",
+        "modelos_cargados": modelos_cargados,
+        "version_api": app.version,
+    }
+
+
+@app.get("/metrics", tags=["Monitoreo"], summary="Métricas agregadas del servicio")
+def obtener_metricas():
+    """Tráfico, tasa de error y latencias (promedio, p50 y p95) desde que arrancó el servidor."""
+    metricas = METRICAS_API.obtener_metricas()
+    logger.info("Métricas de la API consultadas", extra={"metricas": metricas})
+    return metricas
+
+
 # CONTRATO DE ENTRADA DEL INGRESO. Pydantic valida el JSON ANTES de que el
 # codigo toque el modelo: un tipo de trabajo que no existe o un kilometraje
 # negativo se rechazan con 422 automaticamente.
@@ -352,6 +422,10 @@ def predecir_con_ingreso_de_hoy(vin: str, ingreso: IngresoHoy):
     vin = vin.strip().upper()
     visitas_vin = historial[historial[config.COLUMNA_VIN] == vin]
     if visitas_vin.empty:
+        logger.warning(
+            "Consulta de VIN sin historial",
+            extra={"vin": vin, "evento": "vin_no_encontrado"},
+        )
         raise HTTPException(
             status_code=404,
             detail=(f"El VIN '{vin}' no tiene historial en el concesionario: este sería su primer ingreso, "
@@ -400,4 +474,19 @@ def predecir_con_ingreso_de_hoy(vin: str, ingreso: IngresoHoy):
 
     # Si llamar o no se decide contra el día REAL de la consulta: las fechas del
     # ingreso y de la entrega ya viajan en el cuerpo de la petición.
-    return _respuesta_desde_ficha(vin, ficha, hoy)
+    respuesta = _respuesta_desde_ficha(vin, ficha, hoy)
+
+    riesgo = respuesta.get("riesgo_de_fuga") or {}
+    logger.info(
+        "Predicción de retención ejecutada exitosamente",
+        extra={
+            "evento": "prediccion_exitosa",
+            "vin": vin,
+            "kilometraje": ingreso.kilometraje,
+            "dias_retorno_predichos": respuesta["prediccion_dias_retorno"],
+            "probabilidad_fuga": riesgo.get("probabilidad_fuga"),
+            "alerta_fuga": riesgo.get("alerta"),
+            "estado_llamada": respuesta["plan_de_llamada"]["estado"],
+        },
+    )
+    return respuesta
